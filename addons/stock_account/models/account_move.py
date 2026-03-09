@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from odoo import fields, models, api
-from odoo.tools.float_utils import float_compare, float_is_zero
-from odoo.tools.misc import groupby
+from odoo.tools import float_compare, float_is_zero
 
 
 class AccountMove(models.Model):
@@ -14,11 +13,8 @@ class AccountMove(models.Model):
     def _compute_show_reset_to_draft_button(self):
         super()._compute_show_reset_to_draft_button()
         for move in self:
-            for line in move.line_ids:
-                # if a line has correction layers hide the 'Reset to Darft' button
-                if line._get_stock_valuation_layers(move).stock_valuation_layer_ids.filtered('account_move_line_id'):
-                    move.show_reset_to_draft_button = False
-                    break
+            if move.sudo().line_ids.stock_valuation_layer_ids:
+                move.show_reset_to_draft_button = False
 
     # -------------------------------------------------------------------------
     # OVERRIDE METHODS
@@ -48,41 +44,15 @@ class AccountMove(models.Model):
         if self._context.get('move_reverse_cancel'):
             return super()._post(soft)
 
-        # Create correction layer if invoice price is different
-        stock_valuation_layers = self.env['stock.valuation.layer'].sudo()
-        valued_lines = self.env['account.move.line'].sudo()
-        for invoice in self:
-            if invoice.sudo().stock_valuation_layer_ids:
-                continue
-            if invoice.move_type in ('in_invoice', 'in_refund', 'in_receipt'):
-                valued_lines |= invoice.invoice_line_ids.filtered(
-                    lambda l: l.product_id and l.product_id.cost_method != 'standard')
-        if valued_lines:
-            stock_valuation_layers |= valued_lines._create_in_invoice_svl()
-
-        for (product, company), dummy in groupby(stock_valuation_layers, key=lambda svl: (svl.product_id, svl.company_id)):
-            product = product.with_company(company.id)
-            if not float_is_zero(product.quantity_svl, precision_rounding=product.uom_id.rounding):
-                product.sudo().with_context(disable_auto_svl=True).write({'standard_price': product.value_svl / product.quantity_svl})
-
-        if stock_valuation_layers:
-            stock_valuation_layers._validate_accounting_entries()
-
         # Create additional COGS lines for customer invoices.
         self.env['account.move.line'].create(self._stock_account_prepare_anglo_saxon_out_lines_vals())
 
         # Post entries.
         posted = super()._post(soft)
 
-        # The invoice reference is set during the super call
-        for layer in stock_valuation_layers:
-            description = f"{layer.account_move_line_id.move_id.display_name} - {layer.product_id.display_name}"
-            layer.description = description
-            layer.account_move_id.ref = description
-            layer.account_move_id.line_ids.write({'name': description})
-
         # Reconcile COGS lines in case of anglo-saxon accounting with perpetual valuation.
-        posted._stock_account_anglo_saxon_reconcile_valuation()
+        if not self.env.context.get('skip_cogs_reconciliation'):
+            posted._stock_account_anglo_saxon_reconcile_valuation()
         return posted
 
     def button_draft(self):
@@ -135,12 +105,15 @@ class AccountMove(models.Model):
         :return: A list of Python dictionary to be passed to env['account.move.line'].create.
         '''
         lines_vals_list = []
+        price_unit_prec = self.env['decimal.precision'].precision_get('Product Price')
         for move in self:
             # Make the loop multi-company safe when accessing models like product.product
             move = move.with_company(move.company_id)
 
             if not move.is_sale_document(include_receipts=True) or not move.company_id.anglo_saxon_accounting:
                 continue
+
+            anglo_saxon_price_ctx = move._get_anglo_saxon_price_ctx()
 
             for line in move.invoice_line_ids:
 
@@ -157,8 +130,11 @@ class AccountMove(models.Model):
 
                 # Compute accounting fields.
                 sign = -1 if move.move_type == 'out_refund' else 1
-                price_unit = line._stock_account_get_anglo_saxon_price_unit()
+                price_unit = line.with_context(anglo_saxon_price_ctx)._stock_account_get_anglo_saxon_price_unit()
                 amount_currency = sign * line.quantity * price_unit
+
+                if move.currency_id.is_zero(amount_currency) or float_is_zero(price_unit, precision_digits=price_unit_prec):
+                    continue
 
                 # Add interim account line.
                 lines_vals_list.append({
@@ -192,6 +168,12 @@ class AccountMove(models.Model):
                 })
         return lines_vals_list
 
+    def _get_anglo_saxon_price_ctx(self):
+        """ To be overriden in modules overriding _stock_account_get_anglo_saxon_price_unit
+        to optimize computations that only depend on account.move and not account.move.line
+        """
+        return self.env.context
+
     def _stock_account_get_last_step_stock_moves(self):
         """ To be overridden for customer invoices and vendor bills in order to
         return the stock moves related to the invoices in self.
@@ -209,6 +191,8 @@ class AccountMove(models.Model):
                 continue
 
             stock_moves = move._stock_account_get_last_step_stock_moves()
+            # In case we return a return, we have to provide the related AMLs so all can be reconciled
+            stock_moves |= stock_moves.origin_returned_move_id
 
             if not stock_moves:
                 continue
@@ -231,21 +215,26 @@ class AccountMove(models.Model):
                         lambda line: line.product_id == prod and line.account_id == product_interim_account and not line.reconciled)
 
                     # Search for anglo-saxon lines linked to the product in the stock moves.
-                    product_stock_moves = stock_moves.filtered(lambda stock_move: stock_move.product_id == prod)
+                    product_stock_moves = stock_moves._get_all_related_sm(prod)
                     product_account_moves |= product_stock_moves._get_all_related_aml().filtered(
-                        lambda line: line.account_id == product_interim_account and not line.reconciled
+                        lambda line: line.account_id == product_interim_account and not line.reconciled and line.move_id.state == "posted"
                     )
 
-                    # Reconcile.
-                    if any(aml.amount_currency and not aml.balance for aml in product_account_moves):
-                        stock_aml = product_account_moves.filtered(lambda aml: aml.move_id.stock_valuation_layer_ids.stock_move_id)
-                        invoice_aml = product_account_moves.filtered(lambda aml: aml.move_id == move)
-                        correction_amls = product_account_moves - stock_aml - invoice_aml
+                    correction_amls = product_account_moves.filtered(
+                        lambda aml: aml.move_id.sudo().stock_valuation_layer_ids.stock_valuation_layer_id or (aml.display_type == 'cogs' and not aml.quantity)
+                    )
+                    invoice_aml = product_account_moves.filtered(lambda aml: aml not in correction_amls and aml.move_id == move)
+                    stock_aml = product_account_moves - correction_amls - invoice_aml
+                    # Reconcile:
+                    # In case there is a move with correcting lines that has not been posted
+                    # (e.g., it's dated for some time in the future) we should defer any
+                    # reconciliation with exchange difference.
+                    if correction_amls or 'draft' in move.line_ids.sudo().stock_valuation_layer_ids.account_move_id.mapped('state'):
                         if sum(correction_amls.mapped('balance')) > 0:
                             product_account_moves.with_context(no_exchange_difference=True).reconcile()
                         else:
                             (invoice_aml | correction_amls).with_context(no_exchange_difference=True).reconcile()
-                            (invoice_aml | stock_aml).with_context(no_exchange_difference=True).reconcile()
+                            (invoice_aml.filtered(lambda aml: not aml.reconciled) | stock_aml).with_context(no_exchange_difference=True).reconcile()
                     else:
                         product_account_moves.reconcile()
 
@@ -261,7 +250,7 @@ class AccountMoveLine(models.Model):
     def _compute_account_id(self):
         super()._compute_account_id()
         input_lines = self.filtered(lambda line: (
-            line.product_id.type == 'product'
+            line._can_use_stock_accounts()
             and line.move_id.company_id.anglo_saxon_accounting
             and line.move_id.is_purchase_document()
         ))
@@ -272,50 +261,16 @@ class AccountMoveLine(models.Model):
             if accounts['stock_input']:
                 line.account_id = accounts['stock_input']
 
-    def _create_in_invoice_svl(self):
-        svl_vals_list = []
-        for line in self:
-            line = line.with_company(line.company_id)
-            move = line.move_id.with_company(line.move_id.company_id)
-            po_line = line.purchase_line_id
-            uom = line.product_uom_id or line.product_id.uom_id
-
-            # Don't create value for more quantity than received
-            quantity = po_line.qty_received - (po_line.qty_invoiced - line.quantity)
-            quantity = max(min(line.quantity, quantity), 0)
-            if float_is_zero(quantity, precision_rounding=uom.rounding):
-                continue
-
-            layers = line._get_stock_valuation_layers(move)
-            # Retrieves SVL linked to a return.
-            if not layers:
-                continue
-
-            price_unit = line._get_gross_unit_price()
-            price_unit = line.currency_id._convert(price_unit, line.company_id.currency_id, line.company_id, line.date, round=False)
-            price_unit = line.product_uom_id._compute_price(price_unit, line.product_id.uom_id)
-            layers_price_unit = line._get_stock_valuation_layers_price_unit(layers)
-            layers_to_correct = line._get_stock_layer_price_difference(layers, layers_price_unit, price_unit)
-            svl_vals_list += line._prepare_in_invoice_svl_vals(layers_to_correct)
-        return self.env['stock.valuation.layer'].sudo().create(svl_vals_list)
-
     def _eligible_for_cogs(self):
         self.ensure_one()
         return self.product_id.type == 'product' and self.product_id.valuation == 'real_time'
 
     def _get_gross_unit_price(self):
-        price_unit = -self.price_unit if self.move_id.move_type == 'in_refund' else self.price_unit
-        price_unit = price_unit * (1 - (self.discount or 0.0) / 100.0)
-        if not self.tax_ids:
-            return price_unit
-        prec = 1e+6
-        price_unit *= prec
-        price_unit = self.tax_ids.with_context(round=False).compute_all(
-            price_unit, currency=self.move_id.currency_id, quantity=1.0, is_refund=self.move_id.move_type == 'in_refund',
-            fixed_multiplicator=self.move_id.direction_sign,
-        )['total_excluded']
-        price_unit /= prec
-        return price_unit
+        if float_is_zero(self.quantity, precision_rounding=self.product_uom_id.rounding):
+            return self.price_unit
+
+        price_unit = self.price_subtotal / self.quantity
+        return -price_unit if self.move_id.move_type == 'in_refund' else price_unit
 
     def _get_stock_valuation_layers(self, move):
         valued_moves = self._get_valued_in_moves()
@@ -325,72 +280,11 @@ class AccountMoveLine(models.Model):
             valued_moves = valued_moves.filtered(lambda stock_move: stock_move._is_in())
         return valued_moves.stock_valuation_layer_ids
 
-    def _get_stock_valuation_layers_price_unit(self, layers):
-        price_unit_by_layer = {}
-        for layer in layers:
-            price_unit_by_layer[layer] = layer.value / layer.quantity
-        return price_unit_by_layer
-
-    def _get_stock_layer_price_difference(self, layers, layers_price_unit, price_unit):
-        self.ensure_one()
-        po_line = self.purchase_line_id
-        aml_qty = self.product_uom_id._compute_quantity(self.quantity, self.product_id.uom_id)
-        invoice_lines = po_line.invoice_lines - self
-        invoices_qty = 0
-        for invoice_line in invoice_lines:
-            invoices_qty += invoice_line.product_uom_id._compute_quantity(invoice_line.quantity, invoice_line.product_id.uom_id)
-        qty_received = po_line.product_uom._compute_quantity(po_line.qty_received, self.product_id.uom_id)
-        out_qty = qty_received - sum(layers.mapped('remaining_qty'))
-        out_and_not_billed_qty = max(0, out_qty - invoices_qty)
-        total_to_correct = max(0, aml_qty - out_and_not_billed_qty)
-        # we also need to skip the remaining qty that is already billed
-        total_to_skip = max(0, invoices_qty - out_qty)
-        layers_to_correct = {}
-        for layer in layers:
-            if float_compare(total_to_correct, 0, precision_rounding=self.product_id.uom_id.rounding) <= 0:
-                break
-            remaining_qty = layer.remaining_qty
-            qty_to_skip = min(total_to_skip, remaining_qty)
-            remaining_qty = max(0, remaining_qty - qty_to_skip)
-            qty_to_correct = min(total_to_correct, remaining_qty)
-            total_to_skip -= qty_to_skip
-            total_to_correct -= qty_to_correct
-            unit_valuation_difference = price_unit - layers_price_unit[layer]
-            if float_is_zero(unit_valuation_difference * qty_to_correct, precision_rounding=self.company_id.currency_id.rounding):
-                continue
-            po_pu_curr = po_line.currency_id._convert(po_line.price_unit, self.currency_id, self.company_id, self.date, round=False)
-            price_difference_curr = po_pu_curr - self._get_gross_unit_price()
-            layers_to_correct[layer] = (qty_to_correct, unit_valuation_difference, price_difference_curr)
-        return layers_to_correct
-
     def _get_valued_in_moves(self):
         return self.env['stock.move']
 
-    def _prepare_in_invoice_svl_vals(self, layers_correction):
-        svl_vals_list = []
-        invoiced_qty = self.quantity
-        common_svl_vals = {
-            'account_move_id': self.move_id.id,
-            'account_move_line_id': self.id,
-            'company_id': self.company_id.id,
-            'product_id': self.product_id.id,
-            'quantity': 0,
-            'unit_cost': 0,
-            'remaining_qty': 0,
-            'remaining_value': 0,
-            'description': self.move_id.name and '%s - %s' % (self.move_id.name, self.product_id.name) or self.product_id.name,
-        }
-        for layer, (quantity, price_difference, price_difference_curr) in layers_correction.items():
-            svl_vals = self.product_id._prepare_in_svl_vals(quantity, price_difference)
-            diff_value_curr = self.currency_id.round(price_difference_curr * quantity)
-            svl_vals.update(**common_svl_vals, stock_valuation_layer_id=layer.id, price_diff_value=diff_value_curr)
-            svl_vals_list.append(svl_vals)
-            # Adds the difference into the last SVL's remaining value.
-            layer.remaining_value += svl_vals['value']
-            if float_compare(invoiced_qty, 0, self.product_id.uom_id.rounding) <= 0:
-                break
-
-        return svl_vals_list
+    def _can_use_stock_accounts(self):
+        return self.product_id.type == 'product' and self.product_id.categ_id.property_valuation == 'real_time'
 
     def _stock_account_get_anglo_saxon_price_unit(self):
         self.ensure_one()
@@ -406,3 +300,54 @@ class AccountMoveLine(models.Model):
     @api.onchange('product_id')
     def _inverse_product_id(self):
         super(AccountMoveLine, self.filtered(lambda l: l.display_type != 'cogs'))._inverse_product_id()
+
+    def _deduce_anglo_saxon_unit_price(self, account_moves, stock_moves):
+        self.ensure_one()
+
+        move_is_downpayment = self.env.context.get("move_is_downpayment")
+        if move_is_downpayment is None:
+            move_is_downpayment = self.move_id.invoice_line_ids.filtered(
+                lambda line: any(line.sale_line_ids.mapped("is_downpayment"))
+            )
+
+        is_line_reversing = False
+        if self.move_id.move_type == 'out_refund' and not move_is_downpayment:
+            is_line_reversing = True
+        qty_to_invoice = self.product_uom_id._compute_quantity(self.quantity, self.product_id.uom_id)
+        if self.move_id.move_type == 'out_refund' and move_is_downpayment:
+            qty_to_invoice = -qty_to_invoice
+        account_moves = account_moves.filtered(lambda m: m.state == 'posted' and bool(m.reversed_entry_id) == is_line_reversing)
+
+        posted_cogs = self.env['account.move.line'].search([
+            ('move_id', 'in', account_moves.ids),
+            ('display_type', '=', 'cogs'),
+            ('product_id', '=', self.product_id.id),
+            ('balance', '>', 0),
+        ])
+        qty_invoiced = 0
+        product_uom = self.product_id.uom_id
+        for line in posted_cogs:
+            if float_compare(line.quantity, 0, precision_rounding=product_uom.rounding) and line.move_id.move_type == 'out_refund' and any(line.move_id.invoice_line_ids.sale_line_ids.mapped('is_downpayment')):
+                qty_invoiced += line.product_uom_id._compute_quantity(abs(line.quantity), line.product_id.uom_id)
+            else:
+                qty_invoiced += line.product_uom_id._compute_quantity(line.quantity, line.product_id.uom_id)
+        value_invoiced = sum(posted_cogs.mapped('balance'))
+        reversal_moves = self.env['account.move']._search([('reversed_entry_id', 'in', posted_cogs.move_id.ids)])
+        reversal_cogs = self.env['account.move.line'].search([
+            ('move_id', 'in', reversal_moves),
+            ('display_type', '=', 'cogs'),
+            ('product_id', '=', self.product_id.id),
+            ('balance', '>', 0)
+        ])
+        for line in reversal_cogs:
+            if float_compare(line.quantity, 0, precision_rounding=product_uom.rounding) and line.move_id.move_type == 'out_refund' and any(line.move_id.invoice_line_ids.sale_line_ids.mapped('is_downpayment')):
+                qty_invoiced -= line.product_uom_id._compute_quantity(abs(line.quantity), line.product_id.uom_id)
+            else:
+                qty_invoiced -= line.product_uom_id._compute_quantity(line.quantity, line.product_id.uom_id)
+        value_invoiced -= sum(reversal_cogs.mapped('balance'))
+
+        product = self.product_id.with_company(self.company_id).with_context(value_invoiced=value_invoiced)
+        average_price_unit = product._compute_average_price(qty_invoiced, qty_to_invoice, stock_moves, is_returned=is_line_reversing)
+        price_unit = self.product_id.uom_id.with_company(self.company_id)._compute_price(average_price_unit, self.product_uom_id)
+
+        return price_unit

@@ -4,7 +4,7 @@ import re
 import base64
 import io
 
-from PyPDF2 import PdfFileReader, PdfFileMerger, PdfFileWriter
+from PyPDF2 import PdfFileReader, PdfFileWriter
 from reportlab.platypus import Frame, Paragraph, KeepInFrame
 from reportlab.lib.units import mm
 from reportlab.lib.pagesizes import A4
@@ -42,7 +42,7 @@ class SnailmailLetter(models.Model):
         default=lambda self: self.env.company.id)
     report_template = fields.Many2one('ir.actions.report', 'Optional report to print and attach')
 
-    attachment_id = fields.Many2one('ir.attachment', string='Attachment', ondelete='cascade')
+    attachment_id = fields.Many2one('ir.attachment', string='Attachment', ondelete='cascade', index='btree_not_null')
     attachment_datas = fields.Binary('Document', related='attachment_id.datas')
     attachment_fname = fields.Char('Attachment Filename', related='attachment_id.name')
     color = fields.Boolean(string='Color', default=lambda self: self.env.company.snailmail_color)
@@ -58,12 +58,12 @@ class SnailmailLetter(models.Model):
              "If the letter is correctly sent, the status goes in 'Sent',\n"
              "If not, it will got in state 'Error' and the error message will be displayed in the field 'Error Message'.")
     error_code = fields.Selection([(err_code, err_code) for err_code in ERROR_CODES], string="Error")
-    info_msg = fields.Char('Information')
+    info_msg = fields.Html('Information')
     display_name = fields.Char('Display Name', compute="_compute_display_name")
 
     reference = fields.Char(string='Related Record', compute='_compute_reference', readonly=True, store=False)
 
-    message_id = fields.Many2one('mail.message', string="Snailmail Status Message")
+    message_id = fields.Many2one('mail.message', string="Snailmail Status Message", index='btree_not_null')
     notification_ids = fields.One2many('mail.notification', 'letter_id', "Notifications")
 
     street = fields.Char('Street')
@@ -120,7 +120,14 @@ class SnailmailLetter(models.Model):
 
         self.env['mail.notification'].sudo().create(notification_vals)
 
+        letters.attachment_id.check('read')
         return letters
+
+    def write(self, vals):
+        res = super().write(vals)
+        if 'attachment_id' in vals:
+            self.attachment_id.check('read')
+        return res
 
     def _fetch_attachment(self):
         """
@@ -169,7 +176,7 @@ class SnailmailLetter(models.Model):
             :param bin_pdf : binary content of the pdf file
         """
         pages = 0
-        for match in re.compile(b"/Count\s+(\d+)").finditer(bin_pdf):
+        for match in re.compile(br"/Count\s+(\d+)").finditer(bin_pdf):
             pages = int(match.group(1))
         return pages
 
@@ -217,6 +224,14 @@ class SnailmailLetter(models.Model):
 
         batch = len(self) > 1
         for letter in self:
+            recipient_name = letter.partner_id.name or letter.partner_id.parent_id and letter.partner_id.parent_id.name
+            if not recipient_name:
+                letter.write({
+                    'info_msg': _('Invalid recipient name.'),
+                    'state': 'error',
+                    'error_code': 'MISSING_REQUIRED_FIELDS'
+                    })
+                continue
             document = {
                 # generic informations to send
                 'letter_id': letter.id,
@@ -224,7 +239,7 @@ class SnailmailLetter(models.Model):
                 'res_id': letter.res_id,
                 'contact_address': letter.partner_id.with_context(snailmail_layout=True, show_address=True).name_get()[0][1],
                 'address': {
-                    'name': letter.partner_id.name,
+                    'name': recipient_name,
                     'street': letter.partner_id.street,
                     'street2': letter.partner_id.street2,
                     'zip': letter.partner_id.zip,
@@ -444,7 +459,10 @@ class SnailmailLetter(models.Model):
         return all(record[key] for key in required_keys)
 
     def _append_cover_page(self, invoice_bin: bytes):
-        address = self.partner_id.with_context(show_address=True, lang='en_US')._get_name().replace('\n', '<br/>')
+        out_writer = PdfFileWriter()
+        address_split = self.partner_id.with_context(show_address=True, lang='en_US')._get_name().split('\n')
+        address_split[0] = self.partner_id.name or self.partner_id.parent_id and self.partner_id.parent_id.name or address_split[0]
+        address = '<br/>'.join(address_split)
         address_x = 118 * mm
         address_y = 60 * mm
         frame_width = 85.5 * mm
@@ -464,13 +482,16 @@ class SnailmailLetter(models.Model):
         invoice = PdfFileReader(io.BytesIO(invoice_bin))
         cover_bin = io.BytesIO(cover_buf.getvalue())
         cover_file = PdfFileReader(cover_bin)
-        merger = PdfFileMerger()
+        out_writer.appendPagesFromReader(cover_file)
 
-        merger.append(cover_file, import_bookmarks=False)
-        merger.append(invoice, import_bookmarks=False)
+        # Add a blank buffer page to avoid printing behind the cover page
+        if self.duplex:
+            out_writer.addBlankPage()
+
+        out_writer.appendPagesFromReader(invoice)
 
         out_buff = io.BytesIO()
-        merger.write(out_buff)
+        out_writer.write(out_buff)
         return out_buff.getvalue()
 
     def _overwrite_margins(self, invoice_bin: bytes):

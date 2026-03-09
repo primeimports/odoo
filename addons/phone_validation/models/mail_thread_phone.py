@@ -29,6 +29,7 @@ class PhoneMixin(models.AbstractModel):
     _name = 'mail.thread.phone'
     _description = 'Phone Blacklist Mixin'
     _inherit = ['mail.thread']
+    _phone_search_min_length = 3
 
     phone_sanitized = fields.Char(
         string='Sanitized Number', compute="_compute_phone_sanitized", compute_sudo=True, store=True,
@@ -64,7 +65,7 @@ class PhoneMixin(models.AbstractModel):
             op = expression.AND if operator == '=' else expression.OR
             return op([[(phone_field, operator, False)] for phone_field in phone_fields])
 
-        if len(value) < 3:
+        if self._phone_search_min_length and len(value) < self._phone_search_min_length:
             raise UserError(_('Please enter at least 3 characters when searching a Phone/Mobile number.'))
 
         pattern = r'[\s\\./\(\)\-]'
@@ -231,11 +232,11 @@ class PhoneMixin(models.AbstractModel):
         can_access = self.env['phone.blacklist'].check_access_rights('write', raise_exception=False)
         if can_access:
             return {
-                'name': 'Are you sure you want to unblacklist this Phone Number?',
+                'name': _('Are you sure you want to unblacklist this Phone Number?'),
                 'type': 'ir.actions.act_window',
                 'view_mode': 'form',
                 'res_model': 'phone.blacklist.remove',
                 'target': 'new',
             }
         else:
-            raise AccessError("You do not have the access right to unblacklist phone numbers. Please contact your administrator.")
+            raise AccessError(_("You do not have the access right to unblacklist phone numbers. Please contact your administrator."))

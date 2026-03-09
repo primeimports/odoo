@@ -10,8 +10,17 @@ import { FilterMenu } from "../filter_menu/filter_menu";
 import { GroupByMenu } from "../group_by_menu/group_by_menu";
 import { SearchBar } from "../search_bar/search_bar";
 import { Dropdown } from "@web/core/dropdown/dropdown";
+import { Dialog } from "@web/core/dialog/dialog";
 
-import { Component, useState, onMounted, useExternalListener, useRef, useEffect } from "@odoo/owl";
+import {
+    Component,
+    useState,
+    onMounted,
+    useExternalListener,
+    useRef,
+    useEffect,
+    useSubEnv,
+} from "@odoo/owl";
 
 const MAPPING = {
     filter: FilterMenu,
@@ -22,9 +31,19 @@ const MAPPING = {
 
 const STICKY_CLASS = "o_mobile_sticky";
 
+export class ControlPanelSearchDialog extends Component {
+    setup() {
+        useSubEnv(this.props.env);
+    }
+}
+ControlPanelSearchDialog.template = "web.ControlPanelSearchDialog";
+ControlPanelSearchDialog.props = ["close", "slots?", "display", "env", "searchMenus"];
+ControlPanelSearchDialog.components = { Dialog, SearchBar };
+
 export class ControlPanel extends Component {
     setup() {
         this.actionService = useService("action");
+        this.dialog = useService("dialog");
         this.pagerProps = this.env.config.pagerProps
             ? useState(this.env.config.pagerProps)
             : undefined;
@@ -34,7 +53,6 @@ export class ControlPanel extends Component {
 
         this.state = useState({
             showSearchBar: false,
-            showMobileSearch: false,
             showViewSwitcher: false,
         });
 
@@ -78,7 +96,6 @@ export class ControlPanel extends Component {
     resetSearchState() {
         Object.assign(this.state, {
             showSearchBar: false,
-            showMobileSearch: false,
             showViewSwitcher: false,
         });
     }
@@ -120,6 +137,18 @@ export class ControlPanel extends Component {
         return searchMenus;
     }
 
+    openSearchDialog() {
+        this.dialog.add(ControlPanelSearchDialog, {
+            slots: this.props.slots,
+            display: this.display,
+            searchMenus: this.searchMenus,
+            env: {
+                searchModel: this.env.searchModel,
+                config: this.env.config,
+            },
+        });
+    }
+
     /**
      * Called when an element of the breadcrumbs is clicked.
      *
@@ -147,11 +176,11 @@ export class ControlPanel extends Component {
         if (scrollTop > this.initialScrollTop) {
             // Beneath initial position => sticky display
             this.root.el.classList.add(STICKY_CLASS);
-            if (delta < 0) {
-                // Going up
+            if (delta <= 0) {
+                // Going up | not moving
                 this.lastScrollTop = Math.min(0, this.lastScrollTop - delta);
             } else {
-                // Going down | not moving
+                // Going down
                 this.lastScrollTop = Math.max(
                     -this.root.el.offsetHeight,
                     -this.root.el.offsetTop - delta

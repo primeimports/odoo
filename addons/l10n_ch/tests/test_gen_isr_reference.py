@@ -28,6 +28,7 @@ class TestGenISRReference(AccountTestInvoicingCommon):
                 "l10n_ch_isr_subscription_chf": "01-162-8",
                 "bank_id": cls.bank.id,
                 "partner_id": cls.partner_a.id,
+                'allow_out_payment': True,
             }
         )
         cls.bank_acc_qriban = cls.env["res.partner.bank"].create(
@@ -35,8 +36,10 @@ class TestGenISRReference(AccountTestInvoicingCommon):
                 "acc_number": QR_IBAN,
                 "bank_id": cls.bank.id,
                 "partner_id": cls.partner_a.id,
+                'allow_out_payment': True,
             }
         )
+        cls.product_a.taxes_id = cls.product_b.taxes_id = None
         cls.invoice = cls.init_invoice("out_invoice", products=cls.product_a+cls.product_b)
 
     def test_isr(self):
@@ -48,7 +51,7 @@ class TestGenISRReference(AccountTestInvoicingCommon):
 
         expected_isr = "000000000000000012345678903"
         expected_isr_spaced = "00 00000 00000 00001 23456 78903"
-        expected_optical_line = "0100001307807>000000000000000012345678903+ 010001628>"
+        expected_optical_line = "0100001297203>000000000000000012345678903+ 010001628>"
         self.assertEqual(self.invoice.l10n_ch_isr_number, expected_isr)
         self.assertEqual(self.invoice.l10n_ch_isr_number_spaced, expected_isr_spaced)
         self.assertEqual(self.invoice.l10n_ch_isr_optical_line, expected_optical_line)
@@ -73,7 +76,7 @@ class TestGenISRReference(AccountTestInvoicingCommon):
 
         expected_isr = "567890123456789012345678901"
         expected_isr_spaced = "56 78901 23456 78901 23456 78901"
-        expected_optical_line = "0100001307807>567890123456789012345678901+ 010001628>"
+        expected_optical_line = "0100001297203>567890123456789012345678901+ 010001628>"
         self.assertEqual(self.invoice.l10n_ch_isr_number, expected_isr)
         self.assertEqual(self.invoice.l10n_ch_isr_number_spaced, expected_isr_spaced)
         self.assertEqual(self.invoice.l10n_ch_isr_optical_line, expected_optical_line)

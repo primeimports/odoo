@@ -142,11 +142,11 @@ def _eval_xml(self, node, env):
             return '<?xml version="1.0"?>\n'\
                 +_process("".join(etree.tostring(n, encoding='unicode') for n in node))
         if t == 'html':
-            return _process("".join(etree.tostring(n, encoding='unicode') for n in node))
+            return _process("".join(etree.tostring(n, method='html', encoding='unicode') for n in node))
 
         data = node.text
         if node.get('file'):
-            with file_open(node.get('file'), 'rb') as f:
+            with file_open(node.get('file'), 'rb', env=env) as f:
                 data = f.read()
 
         if t == 'base64':
@@ -513,6 +513,14 @@ form: module.record_id""" % (xml_id,)
                 return None
 
             record = env['ir.model.data']._load_xmlid(xid)
+            for child in rec.xpath('.//record[@id]'):
+                sub_xid = child.get("id")
+                self._test_xml_id(sub_xid)
+                sub_xid = self.make_xml_id(sub_xid)
+                sub_record = env['ir.model.data']._load_xmlid(sub_xid)
+                if sub_record:
+                    self.idref[sub_xid] = sub_record.id
+
             if record:
                 # if the resource already exists, don't update it but store
                 # its database id (can be useful)

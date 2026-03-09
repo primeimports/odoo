@@ -48,10 +48,11 @@ class AccountEdiTestCommon(AccountTestInvoicingCommon):
         if edi_format_ref:
             cls.edi_format = cls.env.ref(edi_format_ref)
         else:
-            cls.edi_format = cls.env['account.edi.format'].sudo().create({
-                'name': 'Test EDI format',
-                'code': 'test_edi',
-            })
+            with cls.mock_edi(cls, _needs_web_services_method=_generate_mocked_needs_web_services(True)):
+                cls.edi_format = cls.env['account.edi.format'].sudo().create({
+                    'name': 'Test EDI format',
+                    'code': 'test_edi',
+                })
         cls.journal = cls.company_data['default_journal_sale']
         cls.journal.edi_format_ids = [(6, 0, cls.edi_format.ids)]
 
@@ -167,7 +168,7 @@ class AccountEdiTestCommon(AccountTestInvoicingCommon):
         if formats_to_return != None:
             documents_to_return = documents_to_return.filtered(lambda x: x.edi_format_id.code in formats_to_return)
 
-        attachments = documents_to_return.attachment_id
+        attachments = documents_to_return.sudo().attachment_id
         data_str_list = []
         for attachment in attachments.with_context(bin_size=False):
             data_str_list.append(base64.decodebytes(attachment.datas))

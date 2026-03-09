@@ -5,6 +5,7 @@ from freezegun import freeze_time
 
 from odoo.addons.stock_account.tests.test_anglo_saxon_valuation_reconciliation_common import ValuationReconciliationTestCommon
 from odoo.tests.common import Form, tagged
+from odoo import Command, fields
 
 
 
@@ -26,11 +27,13 @@ class TestValuationReconciliation(ValuationReconciliationTestCommon):
         })
         return company_data
 
-    def _create_purchase(self, product, date, quantity=1.0, set_tax=False, price_unit=66.0):
+    def _create_purchase(self, product, date, quantity=1.0, set_tax=False, price_unit=66.0, currency=False):
+        if not currency:
+            currency = self.currency_data['currency']
         with freeze_time(date):
             rslt = self.env['purchase.order'].create({
                 'partner_id': self.partner_a.id,
-                'currency_id': self.currency_data['currency'].id,
+                'currency_id': currency.id,
                 'order_line': [
                     (0, 0, {
                         'name': product.name,
@@ -210,6 +213,75 @@ class TestValuationReconciliation(ValuationReconciliationTestCommon):
         picking = self.env['stock.picking'].search([('purchase_id', '=', purchase_order.id)])
         self.check_reconciliation(invoice, picking)
 
+    @freeze_time('2021-01-03')
+    def test_price_difference_exchange_difference_accounting_date(self):
+        self.stock_account_product_categ.property_account_creditor_price_difference_categ = self.company_data['default_account_stock_price_diff']
+        test_product = self.test_product_delivery
+        test_product.categ_id.write({"property_cost_method": "standard"})
+        test_product.write({'standard_price': 100.0})
+        date_po_receipt = '2021-01-02'
+        rate_po_receipt = 25.0
+        date_bill = '2021-01-01'
+        rate_bill = 30.0
+        date_accounting = '2021-01-03'
+        rate_accounting = 26.0
+
+        foreign_currency = self.currency_data['currency']
+        company_currency = self.env.company.currency_id
+        self.env['res.currency.rate'].create([
+        {
+            'name': date_po_receipt,
+            'rate': rate_po_receipt,
+            'currency_id': foreign_currency.id,
+            'company_id': self.env.company.id,
+        }, {
+            'name': date_bill,
+            'rate': rate_bill,
+            'currency_id': foreign_currency.id,
+            'company_id': self.env.company.id,
+        }, {
+            'name': date_accounting,
+            'rate': rate_accounting,
+            'currency_id': foreign_currency.id,
+            'company_id': self.env.company.id,
+        }, {
+            'name': date_po_receipt,
+            'rate': 1.0,
+            'currency_id': company_currency.id,
+            'company_id': self.env.company.id,
+        }, {
+            'name': date_accounting,
+            'rate': 1.0,
+            'currency_id': company_currency.id,
+            'company_id': self.env.company.id,
+        }, {
+            'name': date_bill,
+            'rate': 1.0,
+            'currency_id': company_currency.id,
+            'company_id': self.env.company.id,
+        }])
+
+        #purchase order created in foreign currency
+        purchase_order = self._create_purchase(test_product, date_po_receipt, quantity=10, price_unit=3000)
+        with freeze_time(date_po_receipt):
+            self._process_pickings(purchase_order.picking_ids)
+        invoice = self._create_invoice_for_po(purchase_order, date_bill)
+        with Form(invoice) as move_form:
+            move_form.invoice_date = fields.Date.from_string(date_bill)
+            move_form.date = fields.Date.from_string(date_accounting)
+        invoice.action_post()
+
+        price_diff_line = invoice.line_ids.filtered(lambda l: l.account_id == self.stock_account_product_categ.property_account_creditor_price_difference_categ)
+        self.assertTrue(len(price_diff_line) == 1, "A price difference line should be created")
+        self.assertAlmostEqual(price_diff_line.balance, 192.31)
+        self.assertAlmostEqual(price_diff_line.price_subtotal, 5000.0)
+
+        picking = self.env['stock.picking'].search([('purchase_id', '=', purchase_order.id)])
+        interim_account_id = self.company_data['default_account_stock_in'].id
+
+        valuation_line = picking.move_ids.mapped('account_move_ids.line_ids').filtered(lambda x: x.account_id.id == interim_account_id)
+        self.assertTrue(valuation_line.full_reconcile_id, "The reconciliation should be total at that point.")
+
     def test_reconcile_cash_basis_bill(self):
         ''' Test the generation of the CABA move after bill payment
         '''
@@ -321,3 +393,222 @@ class TestValuationReconciliation(ValuationReconciliationTestCommon):
             {'debit': 0.0,     'credit': 50.0,      'amount_currency': -100.0,   'account_id': cash_basis_transfer_account.id},
             {'debit': 50.0,      'credit': 0.0,     'amount_currency': 100.0,  'account_id': tax_account_1.id},
         ])
+
+    def test_reconciliation_differed_billing(self):
+        """
+        Test whether products received billed at different time will be correctly reconciled
+        valuation: automated
+        - create a rfq
+        - receive products
+        - create bill - set quantity of product A = 0 - save
+        - create bill - confirm
+        -> the reconciliation should not take into account the lines of the first bill
+        """
+        date_po_and_delivery = '2022-03-02'
+        self.product_a.write({
+            'categ_id': self.stock_account_product_categ,
+            'detailed_type': 'product',
+        })
+        self.product_b.write({
+            'categ_id': self.stock_account_product_categ,
+            'detailed_type': 'product',
+        })
+        purchase_order = self.env['purchase.order'].create({
+                'currency_id': self.currency_data['currency'].id,
+                'order_line': [
+                    Command.create({
+                        'name': self.product_a.name,
+                        'product_id': self.product_a.id,
+                        'product_qty': 1,
+                    }),
+                    Command.create({
+                        'name': self.product_b.name,
+                        'product_id': self.product_b.id,
+                        'product_qty': 1,
+                    }),
+                ],
+                'partner_id': self.partner_a.id,
+            })
+        purchase_order.button_confirm()
+        self._process_pickings(purchase_order.picking_ids, date=date_po_and_delivery)
+
+        bill_1 = self._create_invoice_for_po(purchase_order, date_po_and_delivery)
+        move_form = Form(bill_1)
+        with move_form.invoice_line_ids.edit(0) as line_form:
+            line_form.quantity = 0
+        move_form.save()
+
+        bill_2 = self._create_invoice_for_po(purchase_order, date=date_po_and_delivery)
+        bill_2.action_post()
+        aml = bill_2.line_ids.filtered(lambda line: line.display_type == "product")
+        pol = purchase_order.order_line
+        self.assertRecordValues(pol, [{'qty_invoiced': line.qty_received} for line in pol])
+        self.assertRecordValues(aml, [{'reconciled': True} for line in aml])
+
+    def test_create_fifo_vacuum_anglo_saxon_expense_entry(self):
+
+        # create purchase
+        self.product_a.write({
+            'standard_price': 27.0,
+            'categ_id': self.stock_account_product_categ,
+            'detailed_type': 'product',
+        })
+
+        self.stock_account_product_categ['property_cost_method'] = 'average'
+
+        #create purchase
+        date_po_and_delivery = '2018-01-01'
+        purchase_order = self._create_purchase(self.product_a, date_po_and_delivery, 1, price_unit=27)
+
+        # proccess picking
+        self._process_pickings(purchase_order.picking_ids, date=date_po_and_delivery)
+
+        # create return
+        picking = purchase_order.picking_ids[0]
+        stock_return_picking_form = Form(self.env['stock.return.picking']
+            .with_context(active_ids=picking.ids, active_id=picking.ids[0],
+            active_model='stock.picking'))
+        stock_return_picking = stock_return_picking_form.save()
+        stock_return_picking.product_return_moves.write({'quantity': 1000.0})
+        stock_return_picking_action = stock_return_picking.create_returns()
+        return_pick = self.env['stock.picking'].browse(stock_return_picking_action['res_id'])
+        return_pick.move_line_ids.write({'qty_done': 1000})
+        return_pick.button_validate()
+
+        # create vendor bill
+        move_form = Form(self.env['account.move'].with_context(default_move_type='in_refund'))
+        move_form._view['modifiers']['purchase_id']['invisible'] = False
+        move_form.partner_id = purchase_order.partner_id
+        move_form.invoice_date = date_po_and_delivery
+        move_form.purchase_id = purchase_order
+        with move_form.invoice_line_ids.edit(0) as line_form:
+            line_form.quantity = 999.0
+        invoice = move_form.save()
+        invoice.action_post()
+
+        # register payment
+        self.env['account.payment.register']\
+            .with_context(active_ids=invoice.ids, active_model='account.move')\
+            .create({})\
+            ._create_payments()
+
+        # create another purchase
+        purchase_order2 = self.env['purchase.order'].create({
+                'partner_id': self.partner_a.id,
+                'currency_id': self.env.company.currency_id.id,
+                'order_line': [
+                    (0, 0, {
+                        'name': self.product_a.name,
+                        'product_id': self.product_a.id,
+                        'product_qty': 1,
+                        'product_uom': self.product_a.uom_po_id.id,
+                        'price_unit': 29,
+                        'date_planned': date_po_and_delivery,
+                    })],
+                'date_order': date_po_and_delivery,
+            })
+        # confirm PO
+        purchase_order2.button_confirm()
+        # process pickings
+        self._process_pickings(purchase_order2.picking_ids, date_po_and_delivery)
+
+        picking2 = purchase_order2.picking_ids[0]
+        self.assertEqual(picking2.state, 'done')
+
+    def test_manual_cost_adjustment_journal_items_quantity(self):
+        """ The quantity field of `account.move.line` should be permitted to be zero, e.g., in the
+        case of modifying an automatically valuated product's cost.
+        """
+        self.stock_account_product_categ.property_cost_method = 'average'
+        self.product_a.write({
+            'categ_id': self.stock_account_product_categ.id,
+            'detailed_type': 'product',
+        })
+
+        purchase_order = self.env['purchase.order'].create({
+            'partner_id': self.partner_a.id,
+            'order_line': [Command.create({
+                'product_id': self.product_a.id,
+                'product_uom_qty': 5,
+                'price_unit': 4,
+            })],
+        })
+        purchase_order.button_confirm()
+        purchase_order.picking_ids.move_line_ids.qty_done = 5
+        purchase_order.picking_ids.button_validate()
+        with Form(self.product_a) as product_form:
+            product_form.standard_price = 3
+
+        cost_change_journal_items = self.env['account.move.line'].search([
+            ('product_id', '=', self.product_a.id),
+            '|', ('debit', '=', 5), ('credit', '=', 5),
+        ])
+        self.assertEqual(cost_change_journal_items.mapped('quantity'), [0, 0])
+
+    @freeze_time('2025-01-07')
+    def test_exchange_rate_backdated_bill(self):
+        """ Having a purchase order in some foreign currency:
+        Changing the invoice date on the bill for that order after having received the product
+        should not affect the journal entries created after the user clicks the `Post` button on
+        the bill- specifically:
+        (A) In the case where that date is in the future (relative to the actual User time) and
+        (B) The date has an associated currency rate which differs from the one used at reception
+        """
+        product = self.test_product_order
+        self.env['res.currency.rate'].create([{
+            'name': name,
+            'rate': rate,
+            'currency_id': self.env.ref('base.EUR').id,
+            'company_id': self.env.company.id,
+        } for (name, rate) in [('2025-01-06', 0.8), ('2025-01-07', 0.7), ('2025-01-08', 0.8)]])
+        for date in ('2025-01-07', '2025-01-06', '2025-01-08'):
+            purchase_order = self._create_purchase(product, '2025-01-07', quantity=1, set_tax=True, price_unit=10, currency=self.env.ref('base.EUR'))
+            receipt = purchase_order.picking_ids
+            receipt.move_ids.quantity_done = 1
+            receipt.button_validate()
+            purchase_order.action_create_invoice()
+            bill = purchase_order.invoice_ids
+            with Form(bill) as bill_form:
+                bill_form.invoice_date = date
+            bill.action_post()
+
+        # Prior to the commit introducing this test, we would have entries in the following journals:
+        #   | Inventory Valuation | Vendor Bills | Exchange Difference |
+        # Post commit, we should see no entries in the Exchange Difference journal
+        stock_journal_id, bills_journal_id, exchg_journal_id = (
+            product.categ_id.property_stock_journal.id,
+            self.company_data['default_journal_purchase'].id,
+            self.env.company.currency_exchange_journal_id.id,
+        )
+        relevant_amls = self.env['account.move.line'].search([
+            ('journal_id', 'in', (stock_journal_id, bills_journal_id, exchg_journal_id)),
+        ], order='id asc')
+        self.assertEqual(len(relevant_amls), 19)
+        self.assertEqual(self.env['account.journal'].browse(exchg_journal_id).entries_count, 0)
+        self.assertRecordValues(
+            relevant_amls,
+            [
+                # Control (no reconciliation needed)
+                {'journal_id': stock_journal_id,    'balance': -14.29},
+                {'journal_id': stock_journal_id,    'balance':  14.29},
+                {'journal_id': bills_journal_id,    'balance':  14.29},
+                {'journal_id': bills_journal_id,    'balance':   2.14},
+                {'journal_id': bills_journal_id,    'balance': -16.43},
+                # back-dated bill
+                {'journal_id': stock_journal_id,    'balance': -14.29},
+                {'journal_id': stock_journal_id,    'balance':  14.29},
+                {'journal_id': bills_journal_id,    'balance':  12.50},
+                {'journal_id': bills_journal_id,    'balance':   1.88},
+                {'journal_id': bills_journal_id,    'balance': -14.38},
+                {'journal_id': stock_journal_id,    'balance':   1.79},
+                {'journal_id': stock_journal_id,    'balance':  -1.79},
+                # forward-dated bill
+                {'journal_id': stock_journal_id,    'balance': -14.29},
+                {'journal_id': stock_journal_id,    'balance':  14.29},
+                {'journal_id': bills_journal_id,    'balance':  12.50},
+                {'journal_id': bills_journal_id,    'balance':   1.88},
+                {'journal_id': bills_journal_id,    'balance': -14.38},
+                {'journal_id': stock_journal_id,    'balance':   1.79},
+                {'journal_id': stock_journal_id,    'balance':  -1.79},
+            ],
+        )

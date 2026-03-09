@@ -3,9 +3,10 @@
 # 	* spreadsheet_dashboard_sale_expense
 # 
 # Translators:
-# Jolien De Paepe, 2022
 # Martin Trigaux, 2022
 # Cécile Collart <cco@odoo.com>, 2022
+# Jolien De Paepe, 2023
+# Manon Rondou, 2025
 # 
 msgid ""
 msgstr ""
@@ -13,8 +14,8 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2022-12-15 12:44+0000\n"
 "PO-Revision-Date: 2022-12-16 09:48+0000\n"
-"Last-Translator: Cécile Collart <cco@odoo.com>, 2022\n"
-"Language-Team: French (https://www.transifex.com/odoo/teams/41243/fr/)\n"
+"Last-Translator: Manon Rondou, 2025\n"
+"Language-Team: French (https://app.transifex.com/odoo/teams/41243/fr/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
@@ -28,7 +29,7 @@ msgstr ""
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "# Expenses"
-msgstr "# Notes de frais"
+msgstr "# Dépenses"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
@@ -51,56 +52,56 @@ msgstr "Employé"
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "Expense"
-msgstr "Note de frais"
+msgstr "Dépense"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "Expenses"
-msgstr "Notes de frais"
+msgstr "Dépenses"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "Expenses Analysis"
-msgstr "Analyse des notes de frais"
+msgstr "Analyse des dépenses"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "Expenses Analysis by Customer to Reinvoice"
-msgstr "Analyse des notes de frais par client à refacturer"
+msgstr "Analyse des dépenses par client à refacturer"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "KPI - Expenses"
-msgstr "KPI - Notes de frais"
+msgstr "KPI - Dépenses"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "KPI - To reimburse"
-msgstr "KPI - A rembourser"
+msgstr "KPI - À rembourser"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "KPI - To report"
-msgstr "KPI - A signaler"
+msgstr "KPI - À signaler"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "KPI - To validate"
-msgstr "KPI - A valider"
+msgstr "KPI - À valider"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
@@ -129,21 +130,21 @@ msgstr "Produit"
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "To reimburse"
-msgstr "A rembourser"
+msgstr "À rembourser"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "To report"
-msgstr "A signaler"
+msgstr "À signaler"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "To validate"
-msgstr "A valider"
+msgstr "À valider"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript
@@ -167,7 +168,7 @@ msgstr "Meilleurs employés"
 #: code:addons/spreadsheet_dashboard_sale_expense/data/files/expense_dashboard.json:0
 #, python-format
 msgid "Top Expenses"
-msgstr "Principales notes de frais"
+msgstr "Meilleures dépenses"
 
 #. module: spreadsheet_dashboard_sale_expense
 #. odoo-javascript

@@ -41,16 +41,17 @@ class AuthSignupHome(Home):
 
         if 'error' not in qcontext and request.httprequest.method == 'POST':
             try:
+                if not request.env['ir.http']._verify_request_recaptcha_token('signup'):
+                    raise UserError(_("Suspicious activity detected by Google reCaptcha."))
                 self.do_signup(qcontext)
                 # Send an account creation confirmation email
-                if qcontext.get('token'):
-                    User = request.env['res.users']
-                    user_sudo = User.sudo().search(
-                        User._get_login_domain(qcontext.get('login')), order=User._get_login_order(), limit=1
-                    )
-                    template = request.env.ref('auth_signup.mail_template_user_signup_account_created', raise_if_not_found=False)
-                    if user_sudo and template:
-                        template.sudo().send_mail(user_sudo.id, force_send=True)
+                User = request.env['res.users']
+                user_sudo = User.sudo().search(
+                    User._get_login_domain(qcontext.get('login')), order=User._get_login_order(), limit=1
+                )
+                template = request.env.ref('auth_signup.mail_template_user_signup_account_created', raise_if_not_found=False)
+                if user_sudo and template:
+                    template.sudo().send_mail(user_sudo.id, force_send=True)
                 return self.web_login(*args, **kw)
             except UserError as e:
                 qcontext['error'] = e.args[0]
@@ -80,6 +81,8 @@ class AuthSignupHome(Home):
 
         if 'error' not in qcontext and request.httprequest.method == 'POST':
             try:
+                if not request.env['ir.http']._verify_request_recaptcha_token('password_reset'):
+                    raise UserError(_("Suspicious activity detected by Google reCaptcha."))
                 if qcontext.get('token'):
                     self.do_signup(qcontext)
                     return self.web_login(*args, **kw)

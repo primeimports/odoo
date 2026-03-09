@@ -30,7 +30,7 @@ from odoo.modules.module import get_resource_path
 from odoo.tools import (func, misc, transpile_javascript,
     is_odoo_module, SourceMapGenerator, profiler,
     apply_inheritance_specs)
-from odoo.tools.misc import file_open, html_escape as escape
+from odoo.tools.misc import file_open, file_path, html_escape as escape
 from odoo.tools.pycompat import to_text
 
 _logger = logging.getLogger(__name__)
@@ -109,8 +109,8 @@ class AssetNotFound(AssetError):
 
 class AssetsBundle(object):
     rx_css_import = re.compile("(@import[^;{]+;?)", re.M)
-    rx_preprocess_imports = re.compile("""(@import\s?['"]([^'"]+)['"](;?))""")
-    rx_css_split = re.compile("\/\*\! ([a-f0-9-]+) \*\/")
+    rx_preprocess_imports = re.compile(r"""(@import\s?['"]([^'"]+)['"](;?))""")
+    rx_css_split = re.compile(r"\/\*\! ([a-f0-9-]+) \*\/")
 
     TRACKED_BUNDLES = ['web.assets_common', 'web.assets_backend']
 
@@ -280,6 +280,7 @@ class AssetsBundle(object):
         # avoid to invalidate cache if it's already empty (mainly useful for test)
 
         if attachments:
+            _logger.info('Deleting ir.attachment %s (from bundle %s)', attachments.ids, self.name)
             self._unlink_attachments(attachments)
             # force bundle invalidation on other workers
             self.env['ir.qweb'].clear_caches()
@@ -314,12 +315,27 @@ class AssetsBundle(object):
                FROM ir_attachment
               WHERE create_uid = %s
                 AND url like %s
+                AND res_model = 'ir.ui.view'
+                AND res_id = 0
+                AND public = true
            GROUP BY name
            ORDER BY name
          """, [SUPERUSER_ID, url_pattern])
 
         attachment_ids = [r[0] for r in self.env.cr.fetchall()]
+        if not attachment_ids:
+            _logger.info('Failed to find attachment for assets %s', url_pattern)
         return self.env['ir.attachment'].sudo().browse(attachment_ids)
+
+    def add_post_rollback(self):
+        """
+        In some rare cases it is possible that an attachment is created
+        during a transaction, added to the ormcache but the transaction
+        is rolled back, leading to 404 when getting the attachments.
+        This postrollback hook will help fix this issue by clearing the
+        cache if it is not committed.
+        """
+        self.env.cr.postrollback.add(self.env.registry._Registry__cache.clear)
 
     def save_attachment(self, extension, content):
         """Record the given bundle in an ir.attachment and delete
@@ -353,6 +369,7 @@ class AssetsBundle(object):
             'public': True,
             'raw': content.encode('utf8'),
         }
+        self.add_post_rollback()
         attachment = ira.with_user(SUPERUSER_ID).create(values)
         url = self.get_asset_url(
             id=attachment.id,
@@ -843,8 +860,8 @@ class AssetsBundle(object):
                 rtlcss = misc.find_in_path('rtlcss.cmd')
             except IOError:
                 rtlcss = 'rtlcss'
-        cmd = [rtlcss, '-']
 
+        cmd = [rtlcss, '-c', get_resource_path("base", "data/rtlcss.json"), '-']
 
         try:
             rtlcss = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
@@ -864,16 +881,18 @@ class AssetsBundle(object):
             self.css_errors.append(msg)
             return ''
 
-        result = rtlcss.communicate(input=source.encode('utf-8'))
-        if rtlcss.returncode:
-            cmd_output = ''.join(misc.ustr(result))
-            if not cmd_output:
+        stdout, stderr = rtlcss.communicate(input=source.encode('utf-8'))
+        if rtlcss.returncode or (source and not stdout):
+            cmd_output = ''.join(misc.ustr(stderr))
+            if not cmd_output and rtlcss.returncode:
                 cmd_output = "Process exited with return code %d\n" % rtlcss.returncode
+            elif not cmd_output:
+                cmd_output = "rtlcss: error processing payload\n"
             error = self.get_rtlcss_error(cmd_output, source=source)
             _logger.warning(error)
             self.css_errors.append(error)
             return ''
-        rtlcss_result = result[0].strip().decode('utf8')
+        rtlcss_result = stdout.strip().decode('utf8')
         return rtlcss_result
 
     def get_preprocessor_error(self, stderr, source=None):
@@ -987,8 +1006,14 @@ class JavascriptAsset(WebAsset):
 
     def __init__(self, bundle, inline=None, url=None, filename=None):
         super().__init__(bundle, inline, url, filename)
-        self.is_transpiled = is_odoo_module(super().content)
+        self._is_transpiled = None
         self._converted_content = None
+
+    @property
+    def is_transpiled(self):
+        if self._is_transpiled is None:
+            self._is_transpiled = bool(is_odoo_module(super().content))
+        return self._is_transpiled
 
     @property
     def content(self):
@@ -1255,6 +1280,14 @@ class ScssStylesheetAsset(PreprocessedCSS):
         if libsass is None:
             return super().compile(source)
 
+        def scss_importer(path, *args):
+            *parent_path, file = os.path.split(path)
+            try:
+                parent_path = file_path(os.path.join(*parent_path))
+            except FileNotFoundError:
+                parent_path = file_path(os.path.join(self.bootstrap_path, *parent_path))
+            return [(os.path.join(parent_path, file),)]
+
         try:
             profiler.force_hook()
             return libsass.compile(
@@ -1262,6 +1295,7 @@ class ScssStylesheetAsset(PreprocessedCSS):
                 include_paths=[
                     self.bootstrap_path,
                 ],
+                importers=[(0, scss_importer)],
                 output_style=self.output_style,
                 precision=self.precision,
             )

@@ -19,7 +19,11 @@ export const pivotFormulaRegex = /^=.*PIVOT/;
 export function formatDate(interval, value) {
     const output = FORMATS[interval].display;
     const input = FORMATS[interval].out;
-    const date = moment(value, input);
+    
+    let date = moment(value, input);
+    if (interval === "week") {
+        date = date.endOf("week");
+    }
     return date.isValid() ? date.format(output) : _t("None");
 }
 
@@ -64,11 +68,12 @@ export function getFirstPivotFunction(formula) {
  */
 export function makePivotFormula(formula, args) {
     return `=${formula}(${args
-        .map((arg) =>
-            typeof arg == "number" || (typeof arg == "string" && !isNaN(arg))
-                ? `${arg}`
-                : `"${arg.toString().replace(/"/g, '\\"')}"`
-        )
+        .map((arg) => {
+            const stringIsNumber =
+                typeof arg == "string" && !isNaN(arg) && Number(arg).toString() === arg;
+            const convertToNumber = typeof arg == "number" || stringIsNumber;
+            return convertToNumber ? `${arg}` : `"${arg.toString().replace(/"/g, '\\"')}"`;
+        })
         .join(",")})`;
 }
 

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from odoo import Command
 from odoo.addons.l10n_account_edi_ubl_cii_tests.tests.common import TestUBLCommon
 from odoo.tests import tagged
 import base64
@@ -23,7 +24,8 @@ class TestUBLDE(TestUBLCommon):
             'phone': '+49 180 6 225789',
             'email': 'info@legoland.de',
             'country_id': cls.env.ref('base.de').id,
-            'bank_ids': [(0, 0, {'acc_number': 'DE48500105176424548921'})],
+            'bank_ids': [(0, 0, {'acc_number': 'DE48500105176424548921', 'allow_out_payment': True})],
+            'ref': 'ref_partner_1',
         })
 
         cls.partner_2 = cls.env['res.partner'].create({
@@ -33,7 +35,8 @@ class TestUBLDE(TestUBLCommon):
             'city': "Rust",
             'vat': 'DE186775212',
             'country_id': cls.env.ref('base.de').id,
-            'bank_ids': [(0, 0, {'acc_number': 'DE50500105175653254743'})],
+            'bank_ids': [(0, 0, {'acc_number': 'DE50500105175653254743', 'allow_out_payment': True})],
+            'ref': 'ref_partner_2',
         })
 
         cls.tax_19 = cls.env['account.tax'].create({
@@ -123,6 +126,40 @@ class TestUBLDE(TestUBLCommon):
         self.assertEqual(attachment.name[-10:], "ubl_de.xml")
         self._assert_imported_invoice_from_etree(invoice, attachment)
 
+    def test_export_import_invoice_without_vat(self):
+        self.partner_2.vat = False
+        self.partner_2.email = 'partner_2@test.test'
+        invoice = self._generate_move(
+            self.partner_1,
+            self.partner_2,
+            move_type='out_invoice',
+            invoice_line_ids=[
+                {
+                    'product_id': self.product_a.id,
+                    'quantity': 1.0,
+                    'price_unit': 100.0,
+                    'tax_ids': [Command.set(self.tax_19.ids)],
+                },
+            ],
+        )
+        attachment = self._assert_invoice_attachment(
+            invoice,
+            xpaths='''
+                <xpath expr="./*[local-name()='ID']" position="replace">
+                    <ID>___ignore___</ID>
+                </xpath>
+                <xpath expr=".//*[local-name()='InvoiceLine'][1]/*[local-name()='ID']" position="replace">
+                    <ID>___ignore___</ID>
+                </xpath>
+                <xpath expr=".//*[local-name()='PaymentMeans']/*[local-name()='PaymentID']" position="replace">
+                    <PaymentID>___ignore___</PaymentID>
+                </xpath>
+            ''',
+            expected_file='from_odoo/xrechnung_ubl_out_invoice_without_vat.xml',
+        )
+        self.assertEqual(attachment.name[-10:], "ubl_de.xml")
+        self._assert_imported_invoice_from_etree(invoice, attachment)
+
     def test_export_import_refund(self):
         refund = self._generate_move(
             self.partner_1,
@@ -194,6 +231,7 @@ class TestUBLDE(TestUBLCommon):
         acc_bank = self.env['res.partner.bank'].create({
             'acc_number': 'BE15001559627232',
             'partner_id': self.company_data['company'].partner_id.id,
+            'allow_out_payment': True,
         })
         invoice = self.env['account.move'].create({
             'move_type': 'out_invoice',
@@ -221,10 +259,10 @@ class TestUBLDE(TestUBLCommon):
         xml_etree = self.get_xml_tree_from_string(xml_content)
 
         # Export: BuyerReference is in the out_invoice xml
-        self.assertEqual(xml_etree.find('{*}BuyerReference').text, partner.name)
+        self.assertEqual(xml_etree.find('{*}BuyerReference').text, partner.ref)
         self.assertEqual(
             xml_etree.find('{*}CustomizationID').text,
-            'urn:cen.eu:en16931:2017#compliant#urn:xoev-de:kosit:standard:xrechnung_2.2#conformant#urn:xoev-de:kosit:extension:xrechnung_2.2'
+            'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0'
         )
 
         created_bill = self.env['account.move'].create({'move_type': 'in_invoice'})

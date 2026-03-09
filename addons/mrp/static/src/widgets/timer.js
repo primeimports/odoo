@@ -16,7 +16,7 @@ function formatMinutes(value) {
         value = Math.abs(value);
     }
     let min = Math.floor(value);
-    let sec = Math.floor((value % 1) * 60);
+    let sec = Math.round((value % 1) * 60);
     sec = `${sec}`.padStart(2, "0");
     min = `${min}`.padStart(2, "0");
     return `${isNegative ? "-" : ""}${min}:${sec}`;
@@ -66,7 +66,8 @@ export class MrpTimer extends Component {
     }
 
     get durationFormatted() {
-        if(this.props.value!=this.state.duration && this.props.record && !this.readonly){
+        if(this.props.value!=this.state.duration && this.props.record && this.props.record.isDirty){
+            if (typeof this.props.setDirty==='function')this.props.setDirty(false);
             this.state.duration=this.props.value
         }
         return formatMinutes(this.state.duration);

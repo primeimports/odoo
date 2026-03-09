@@ -5,6 +5,7 @@ import { Domain } from "@web/core/domain";
 import { sprintf } from "@web/core/utils/strings";
 import { PivotModel } from "@web/views/pivot/pivot_model";
 import { computeReportMeasures } from "@web/views/utils";
+import { session } from "@web/session";
 
 import { FORMATS } from "../helpers/constants";
 
@@ -164,7 +165,7 @@ export class SpreadsheetPivotModel extends PivotModel {
             const { field } = this.parseGroupField(fieldName);
             return this._isCol(field);
         } catch (_) {
-            false;
+            return false;
         }
     }
 
@@ -334,7 +335,7 @@ export class SpreadsheetPivotModel extends PivotModel {
     /**
      * Get the label of the last group by of the domain
      *
-     * @param {string[]} domain Domain of the formula
+     * @param {any[]} domain Domain of the formula
      */
     getPivotHeaderValue(domain) {
         const groupFieldString = domain[domain.length - 2];
@@ -343,8 +344,7 @@ export class SpreadsheetPivotModel extends PivotModel {
             const { cols, rows } = this._getColsRowsValuesFromDomain(domain);
             return this._isCol(field) ? cols[cols.length - 1] : rows[rows.length - 1];
         }
-        const groupValueString = domain[domain.length - 1];
-        return groupValueString;
+        return domain[domain.length - 1];
     }
 
     /**
@@ -456,7 +456,10 @@ export class SpreadsheetPivotModel extends PivotModel {
                 }
                 const fOut = FORMATS[aggregateOperator]["out"];
                 // eslint-disable-next-line no-undef
-                const date = moment(value);
+                let date = moment(value);
+                if (aggregateOperator === "week") {
+                    date = date.endOf("week");
+                }
                 return date.isValid() ? date.format(fOut) : false;
             }
             return this._sanitizeValue(group[groupBy]);
@@ -479,7 +482,8 @@ export class SpreadsheetPivotModel extends PivotModel {
         if (this.metaData.fields[field.name].type === "date") {
             return sqlValue;
         }
-        return luxon.DateTime.fromSQL(sqlValue, { zone: "utc" }).toLocal().toISODate();
+        const userTz = session.user_context.tz || luxon.Settings.defaultZoneName;
+        return luxon.DateTime.fromSQL(sqlValue, { zone: "utc" }).setZone(userTz).toISODate();
     }
 
     /**
@@ -572,7 +576,7 @@ export class SpreadsheetPivotModel extends PivotModel {
      */
     _getSpreadsheetRows(tree) {
         /**@type {Row[]}*/
-        let rows = [];
+        const rows = [];
         const group = tree.root;
         const indent = group.labels.length;
         const rowGroupBys = this.metaData.fullRowGroupBys;
@@ -586,7 +590,7 @@ export class SpreadsheetPivotModel extends PivotModel {
         const subTreeKeys = tree.sortedKeys || [...tree.directSubTrees.keys()];
         subTreeKeys.forEach((subTreeKey) => {
             const subTree = tree.directSubTrees.get(subTreeKey);
-            rows = rows.concat(this._getSpreadsheetRows(subTree));
+            rows.push(...this._getSpreadsheetRows(subTree));
         });
         return rows;
     }

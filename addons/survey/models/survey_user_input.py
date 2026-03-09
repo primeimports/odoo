@@ -614,7 +614,7 @@ class SurveyUserInputLine(models.Model):
     _order = 'question_sequence, id'
 
     # survey data
-    user_input_id = fields.Many2one('survey.user_input', string='User Input', ondelete='cascade', required=True)
+    user_input_id = fields.Many2one('survey.user_input', string='User Input', ondelete='cascade', required=True, index=True)
     survey_id = fields.Many2one(related='user_input_id.survey_id', string='Survey', store=True, readonly=False)
     question_id = fields.Many2one('survey.question', string='Question', ondelete='cascade', required=True)
     page_id = fields.Many2one(related='question_id.page_id', string="Section", readonly=False)
@@ -651,7 +651,7 @@ class SurveyUserInputLine(models.Model):
             elif line.answer_type == 'date':
                 line.display_name = fields.Date.to_string(line.value_date)
             elif line.answer_type == 'datetime':
-                line.display_name = fields.Datetime.to_string(line.value_datetime)
+                line.display_name = fields.Datetime.to_string(fields.Datetime.context_timestamp(self.env.user, line.value_datetime))
             elif line.answer_type == 'suggestion':
                 if line.matrix_row_id:
                     line.display_name = '%s: %s' % (

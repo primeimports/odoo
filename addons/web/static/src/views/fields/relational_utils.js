@@ -49,7 +49,7 @@ export function useSelectCreate({ resModel, activeActions, onSelected, onCreateE
     const env = useEnv();
     const addDialog = useOwnedDialogs();
 
-    function selectCreate({ domain, context, filters, title }) {
+    function selectCreate({ domain, context, filters, title, kanbanViewId }) {
         addDialog(SelectCreateDialog, {
             title: title || env._t("Select records"),
             noCreate: !activeActions.create,
@@ -61,6 +61,7 @@ export function useSelectCreate({ resModel, activeActions, onSelected, onCreateE
             onCreateEdit: () => onCreateEdit({ context }),
             dynamicFilters: filters,
             onUnselect,
+            kanbanViewId,
         });
     }
     return selectCreate;
@@ -155,6 +156,11 @@ export class Many2XAutocomplete extends Component {
             onRecordSaved: (record) => {
                 return update([record.data]);
             },
+            onRecordDiscarded: () => {
+                if (!isToMany) {
+                    this.props.update(false);
+                }
+            },
             fieldString,
             onClose: () => {
                 const autoCompleteInput = this.autoCompleteContainer.el.querySelector("input");
@@ -209,6 +215,9 @@ export class Many2XAutocomplete extends Component {
             this.props.setInputFloats(true);
         }
     }
+    onCancel() {
+        this.props.setInputFloats(false);
+    }
 
     onSelect(option, params = {}) {
         if (option.action) {
@@ -246,9 +255,28 @@ export class Many2XAutocomplete extends Component {
                 action: async (params) => {
                     try {
                         await this.props.quickCreate(request, params);
-                    } catch {
-                        const context = this.getCreationContext(request);
-                        return this.openMany2X({ context });
+                    } catch (e) {
+                        if (
+                            e &&
+                            e.name === "RPC_ERROR" &&
+                            e.exceptionName === "odoo.exceptions.ValidationError"
+                        ) {
+                            const context = this.getCreationContext(request);
+                            return this.openMany2X({ context });
+                        }
+                        // Compatibility with legacy code
+                        if (
+                            e &&
+                            e.message &&
+                            e.message.name === "RPC_ERROR" &&
+                            e.message.exceptionName === "odoo.exceptions.ValidationError"
+                        ) {
+                            // The event.preventDefault() is necessary because we still use the legacy
+                            e.event.preventDefault();
+                            const context = this.getCreationContext(request);
+                            return this.openMany2X({ context });
+                        }
+                        throw e;
                     }
                 },
             });
@@ -327,6 +355,7 @@ export class Many2XAutocomplete extends Component {
             context,
             filters: dynamicFilters,
             title,
+            kanbanViewId: this.props.kanbanViewId,
         });
     }
 
@@ -350,6 +379,7 @@ Many2XAutocomplete.defaultProps = {
 export function useOpenMany2XRecord({
     resModel,
     onRecordSaved,
+    onRecordDiscarded,
     fieldString,
     activeActions,
     isToMany,
@@ -392,6 +422,7 @@ export function useOpenMany2XRecord({
                 resModel: model,
                 viewId,
                 onRecordSaved,
+                onRecordDiscarded,
                 isToMany,
             },
             {
@@ -427,16 +458,24 @@ export class X2ManyFieldDialog extends Component {
         this.modalRef = useChildRef();
 
         const reload = () => this.record.load();
-        useViewButtons(this.props.record.model, this.modalRef, { reload }); // maybe pass the model directly in props
 
-        if (this.archInfo.xmlDoc.querySelector("footer")) {
+        useViewButtons(this.props.record.model, this.modalRef, {
+            reload,
+            beforeExecuteAction: this.beforeExecuteActionButton.bind(this),
+        }); // maybe pass the model directly in props
+
+        this.canCreate = !this.record.resId;
+
+        if (this.archInfo.xmlDoc.querySelector("footer:not(field footer)")) {
             this.footerArchInfo = Object.assign({}, this.archInfo);
             this.footerArchInfo.xmlDoc = createElement("t");
             this.footerArchInfo.xmlDoc.append(
-                ...[...this.archInfo.xmlDoc.querySelectorAll("footer")]
+                ...[...this.archInfo.xmlDoc.querySelectorAll("footer:not(field footer)")]
             );
             this.footerArchInfo.arch = this.footerArchInfo.xmlDoc.outerHTML;
-            [...this.archInfo.xmlDoc.querySelectorAll("footer")].forEach((x) => x.remove());
+            [...this.archInfo.xmlDoc.querySelectorAll("footer:not(field footer)")].forEach((x) =>
+                x.remove()
+            );
             this.archInfo.arch = this.archInfo.xmlDoc.outerHTML;
         }
 
@@ -465,6 +504,12 @@ export class X2ManyFieldDialog extends Component {
         }
     }
 
+    async beforeExecuteActionButton(clickParams) {
+        if (clickParams.special !== "cancel") {
+            return this.record.save();
+        }
+    }
+
     disableButtons() {
         const btns = this.modalRef.el.querySelectorAll(".modal-footer button");
         for (const btn of btns) {
@@ -475,7 +520,7 @@ export class X2ManyFieldDialog extends Component {
 
     discard() {
         if (this.record.isInEdition) {
-            this.record.discard();
+            this.record.discard({ rollback: true });
         }
         this.props.close();
     }
@@ -490,6 +535,7 @@ export class X2ManyFieldDialog extends Component {
         if (await this.record.checkValidity()) {
             this.record = (await this.props.save(this.record, { saveAndNew })) || this.record;
         } else {
+            this.record.openInvalidFieldsNotification();
             return false;
         }
         if (!saveAndNew) {
@@ -523,6 +569,7 @@ X2ManyFieldDialog.props = {
     save: Function,
     title: String,
     delete: { optional: true },
+    deleteButtonLabel: { optional: true },
     config: Object,
 };
 X2ManyFieldDialog.template = "web.X2ManyFieldDialog";
@@ -598,6 +645,7 @@ export function useOpenX2ManyRecord({
         const form = await getFormViewInfo({ list, activeField, viewService, userService, env });
 
         let deleteRecord;
+        let deleteButtonLabel = undefined;
         const isDuplicate = !!record;
 
         if (record) {
@@ -610,6 +658,8 @@ export function useOpenX2ManyRecord({
             });
             const { delete: canDelete, onDelete } = activeActions;
             deleteRecord = viewMode === "kanban" && canDelete ? () => onDelete(_record) : null;
+            deleteButtonLabel =
+                activeActions.type === "one2many" ? env._t("Delete") : env._t("Remove");
         } else {
             const recordParams = {
                 context: makeContext([list.context, context]),
@@ -639,7 +689,7 @@ export function useOpenX2ManyRecord({
                         return model.addNewRecord(
                             list,
                             {
-                                context: list.context,
+                                context: makeContext([list.context, context]),
                                 resModel: resModel,
                                 activeFields: form.activeFields,
                                 fields: { ...form.fields },
@@ -653,23 +703,52 @@ export function useOpenX2ManyRecord({
                 },
                 title,
                 delete: deleteRecord,
+                deleteButtonLabel: deleteButtonLabel,
             },
             { onClose }
         );
     }
-    return openRecord;
+
+    let recordIsOpen = false;
+    return (params) => {
+        if (recordIsOpen) {
+            return;
+        }
+        recordIsOpen = true;
+
+        const onClose = params.onClose;
+        params = {
+            ...params,
+            onClose: (...args) => {
+                recordIsOpen = false;
+                if (onClose) {
+                    return onClose(...args);
+                }
+            },
+        };
+
+        try {
+            return openRecord(params);
+        } catch (e) {
+            recordIsOpen = false;
+            throw e;
+        }
+    };
 }
 
 export function useX2ManyCrud(getList, isMany2Many) {
     let saveRecord;
     if (isMany2Many) {
-        saveRecord = (object) => {
+        saveRecord = async (object) => {
             const list = getList();
             const currentIds = list.currentIds;
             let resIds;
             if (Array.isArray(object)) {
                 resIds = [...currentIds, ...object];
             } else if (object.resId) {
+                if (object.isDirty) {
+                    await object.save();
+                }
                 resIds = [...currentIds, object.resId];
             } else {
                 return list.add(object, { isM2M: isMany2Many });

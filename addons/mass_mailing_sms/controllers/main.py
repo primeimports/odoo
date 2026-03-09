@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+from werkzeug.exceptions import NotFound
+
 from odoo import http, _
 from odoo.addons.phone_validation.tools import phone_validation
 from odoo.http import request
@@ -92,10 +94,14 @@ class MailingSMSController(http.Controller):
         else:
             trace_id = False
 
-        request.env['link.tracker.click'].sudo().add_click(
-            code,
-            ip=request.httprequest.remote_addr,
-            country_code=country_code,
-            mailing_trace_id=trace_id
-        )
-        return request.redirect(request.env['link.tracker'].get_url_from_code(code), code=301, local=False)
+        if not request.env['ir.http'].is_a_bot():
+            request.env['link.tracker.click'].sudo().add_click(
+                code,
+                ip=request.httprequest.remote_addr,
+                country_code=country_code,
+                mailing_trace_id=trace_id
+            )
+        redirect_url = request.env['link.tracker'].get_url_from_code(code)
+        if not redirect_url:
+            raise NotFound()
+        return request.redirect(redirect_url, code=301, local=False)

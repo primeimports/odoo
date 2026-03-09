@@ -233,9 +233,9 @@ export class PyDate {
      * @returns {PyDate}
      */
     static convertDate(date) {
-        const year = date.getUTCFullYear();
-        const month = date.getUTCMonth() + 1;
-        const day = date.getUTCDate();
+        const year = date.getFullYear();
+        const month = date.getMonth() + 1;
+        const day = date.getDate();
         return new PyDate(year, month, day);
     }
 
@@ -308,7 +308,7 @@ export class PyDate {
         if (other instanceof PyDate) {
             return PyTimeDelta.create(this.toordinal() - other.toordinal());
         }
-        throw NotSupportedError();
+        throw new NotSupportedError();
     }
 
     /**
@@ -340,12 +340,12 @@ export class PyDateTime {
      * @returns {PyDateTime}
      */
     static convertDate(date) {
-        const year = date.getUTCFullYear();
-        const month = date.getUTCMonth() + 1;
-        const day = date.getUTCDate();
-        const hour = date.getUTCHours();
-        const minute = date.getUTCMinutes();
-        const second = date.getUTCSeconds();
+        const year = date.getFullYear();
+        const month = date.getMonth() + 1;
+        const day = date.getDate();
+        const hour = date.getHours();
+        const minute = date.getMinutes();
+        const second = date.getSeconds();
         return new PyDateTime(year, month, day, hour, minute, second, 0);
     }
 
@@ -489,7 +489,14 @@ export class PyDateTime {
      * @returns {PyDateTime}
      */
     to_utc() {
-        const d = new Date(this.year, this.month -1, this.day, this.hour, this.minute, this.second);
+        const d = new Date(
+            this.year,
+            this.month - 1,
+            this.day,
+            this.hour,
+            this.minute,
+            this.second
+        );
         const timedelta = PyTimeDelta.create({ minutes: d.getTimezoneOffset() });
         return this.add(timedelta);
     }
@@ -511,8 +518,8 @@ export class PyTime extends PyDate {
     constructor(hour, minute, second) {
         const now = new Date();
         const year = now.getFullYear();
-        const month = now.getUTCMonth();
-        const day = now.getUTCDate();
+        const month = now.getMonth();
+        const day = now.getDate();
         super(year, month, day);
         this.hour = hour;
         this.minute = minute;
@@ -561,9 +568,8 @@ const PERIODS = ["year", "month", "day", ...TIME_PERIODS];
 const RELATIVE_KEYS = "years months weeks days hours minutes seconds microseconds leapdays".split(
     " "
 );
-const ABSOLUTE_KEYS = "year month day hour minute second microsecond weekday nlyearday yearday".split(
-    " "
-);
+const ABSOLUTE_KEYS =
+    "year month day hour minute second microsecond weekday nlyearday yearday".split(" ");
 
 const argsSpec = ["dt1", "dt2"]; // all other arguments are kwargs
 export class PyRelativeDelta {
@@ -625,7 +631,7 @@ export class PyRelativeDelta {
      */
     static add(date, delta) {
         if (!(date instanceof PyDate || date instanceof PyDateTime)) {
-            throw NotSupportedError();
+            throw new NotSupportedError();
         }
 
         // First pass: we want to determine which is our target year and if we will apply leap days

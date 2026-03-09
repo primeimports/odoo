@@ -6,7 +6,7 @@ from odoo import models, fields, api, _
 class AccountMove(models.Model):
     _inherit = "account.move"
 
-    debit_origin_id = fields.Many2one('account.move', 'Original Invoice Debited', readonly=True, copy=False)
+    debit_origin_id = fields.Many2one('account.move', 'Original Invoice Debited', readonly=True, copy=False, index='btree_not_null')
     debit_note_ids = fields.One2many('account.move', 'debit_origin_id', 'Debit Notes',
                                      help="The debit notes created for this invoice")
     debit_note_count = fields.Integer('Number of Debit Notes', compute='_compute_debit_count')
@@ -28,3 +28,9 @@ class AccountMove(models.Model):
             'view_mode': 'tree,form',
             'domain': [('debit_origin_id', '=', self.id)],
         }
+
+    def _get_copy_message_content(self, default):
+        """Override to handle debit note specific messages."""
+        if default and default.get('debit_origin_id'):
+            return _('This debit note was created from: %s', self._get_html_link())
+        return super()._get_copy_message_content(default)

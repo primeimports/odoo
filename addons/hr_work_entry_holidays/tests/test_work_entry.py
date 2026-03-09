@@ -5,6 +5,7 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import pytz
 
+from odoo import Command
 from odoo.tests.common import tagged
 from odoo.fields import Date, Datetime
 from odoo.addons.hr_work_entry_holidays.tests.common import TestWorkEntryHolidaysBase
@@ -91,7 +92,7 @@ class TestWorkeEntryHolidaysWorkEntry(TestWorkEntryHolidaysBase):
         })
         leave.action_validate()
 
-        work_entries = self.richard_emp.contract_id._generate_work_entries(self.start, self.end)
+        work_entries = self.richard_emp.contract_id.generate_work_entries(self.start.date(), self.end.date())
         work_entries.action_validate()
         leave_work_entry = work_entries.filtered(lambda we: we.work_entry_type_id in self.work_entry_type_leave)
         sum_hours = sum(leave_work_entry.mapped('duration'))
@@ -190,6 +191,78 @@ class TestWorkeEntryHolidaysWorkEntry(TestWorkEntryHolidaysBase):
         leave.action_approve()
         leave.action_validate()
 
-        work_entries = contract._generate_work_entries(date(2020, 7, 1), date(2020, 9, 30))
+        work_entries = contract.generate_work_entries(date(2020, 7, 1), date(2020, 9, 30))
 
         self.assertEqual(len(work_entries), 0)
+
+    def test_work_entries_leave_if_leave_conflict_with_public_holiday(self):
+        date_from = datetime(2023, 2, 1, 0, 0, 0)
+        date_to = datetime(2023, 2, 28, 23, 59, 59)
+        work_entry_type_holiday = self.env['hr.work.entry.type'].create({
+            'name': 'Public Holiday',
+            'is_leave': True,
+            'code': 'LEAVETEST500'
+        })
+        self.env['resource.calendar.leaves'].create({
+            'name': 'Public Holiday',
+            'date_from': datetime(2023, 2, 6, 0, 0, 0),
+            'date_to': datetime(2023, 2, 7, 23, 59, 59),
+            'calendar_id': self.richard_emp.resource_calendar_id.id,
+            'work_entry_type_id': work_entry_type_holiday.id,
+        })
+        leave = self.env['hr.leave'].create({
+            'name': 'AL',
+            'employee_id': self.richard_emp.id,
+            'holiday_status_id': self.leave_type.id,
+            'date_from': date(2023, 2, 3),
+            'date_to': date(2023, 2, 9),
+            'number_of_days': 3,
+        })
+        leave.action_validate()
+
+        self.richard_emp.generate_work_entries(date_from, date_to, True)
+        work_entries = self.env['hr.work.entry'].search([
+            ('employee_id', '=', self.richard_emp.id),
+            ('date_stop', '>=', date_from),
+            ('date_start', '<=', date_to),
+            ('state', '!=', 'validated')])
+        leave_work_entry = work_entries.filtered(lambda we: we.work_entry_type_id in self.work_entry_type_leave)
+        self.assertEqual(leave_work_entry.leave_id.id, leave.id, "Leave work entry should have leave_id value")
+
+        public_holiday_work_entry = work_entries.filtered(lambda we: we.work_entry_type_id == work_entry_type_holiday)
+        self.assertEqual(len(public_holiday_work_entry.leave_id), 0, "Public holiday work entry should not have leave_id")
+
+    def test_leave_validation_with_multiple_work_entry_types(self):
+        employee = self.env['hr.employee'].create({'name': 'Test Employee'})
+        self.env['hr.contract'].create({
+            'name': 'Test Contract',
+            'employee_id': employee.id,
+            'date_start': date(2023, 2, 1),
+            'state': 'open',
+            'wage': 1000,
+            'resource_calendar_id': self.calendar_40h.id,
+            'date_generated_from': datetime(2023, 2, 1, 0, 0),
+            'date_generated_to': datetime(2023, 2, 28, 23, 59),
+        })
+        employee.resource_calendar_id.write({
+            'attendance_ids': [
+                Command.clear(),
+                Command.create({'name': 'Monday Morning', 'dayofweek': '0', 'hour_from': 8, 'hour_to': 12,
+                 'day_period': 'morning', 'work_entry_type_id': self.work_entry_type.id}),
+                Command.create({'name': 'Monday Lunch', 'dayofweek': '0', 'hour_from': 12, 'hour_to': 13,
+                 'day_period': 'afternoon', 'work_entry_type_id': self.work_entry_type_unpaid.id}),
+                Command.create({'name': 'Monday Afternoon', 'dayofweek': '0', 'hour_from': 13, 'hour_to': 17,
+                 'day_period': 'afternoon', 'work_entry_type_id': self.work_entry_type.id}),
+            ]
+        })
+        leave = self.env['hr.leave'].create({
+            'name': 'Test Leave Monday',
+            'employee_id': employee.id,
+            'holiday_status_id': self.leave_type.id,
+            'date_from': datetime(2023, 2, 6, 8, 0, 0),
+            'date_to': datetime(2023, 2, 6, 17, 0, 0),
+            'state': 'draft',
+        })
+        leave.action_confirm()
+        leave.action_validate()
+        self.assertEqual(leave.state, 'validate')

@@ -9,15 +9,11 @@ export class ForecastedWarehouseFilter extends Component {
     setup() {
         this.orm = useService("orm");
         this.context = this.props.action.context;
+        this.warehouses = this.props.warehouses;
         onWillStart(this.onWillStart)
     }
 
     async onWillStart() {
-        this.warehouses = await this.orm.call('report.stock.report_product_product_replenishment', 'get_warehouses', []);
-
-        if (!this.context.warehouse)
-            this.props.setWarehouseInContext(this.warehouses[0].id);
-
         this.displayWarehouseFilter = (this.warehouses.length > 1);
     }
 
@@ -26,13 +22,17 @@ export class ForecastedWarehouseFilter extends Component {
     }
 
     get activeWarehouse(){
-        if (this.context.warehouse)
-            return this.warehouses.find(w => w.id == this.context.warehouse);
-        else
-            return this.warehouses[0];
+        let warehouseId = null;
+        if (Array.isArray(this.context.warehouse)) {
+            const validWarehouseIds = this.context.warehouse.filter(Number.isInteger);
+            warehouseId = validWarehouseIds.length ? validWarehouseIds[0] : null;
+        } else if (Number.isInteger(this.context.warehouse)) {
+            warehouseId = this.context.warehouse;
+        }
+        return warehouseId ? this.warehouses.find((w) => w.id == warehouseId) : this.warehouses[0];
     }
 }
 
 ForecastedWarehouseFilter.template = 'stock.ForecastedWarehouseFilter';
 ForecastedWarehouseFilter.components = {Dropdown, DropdownItem};
-ForecastedWarehouseFilter.props = {action: Object, setWarehouseInContext : Function};
+ForecastedWarehouseFilter.props = {action: Object, setWarehouseInContext : Function, warehouses: Array};

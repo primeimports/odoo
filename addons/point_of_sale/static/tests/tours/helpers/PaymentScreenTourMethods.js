@@ -92,6 +92,14 @@ odoo.define('point_of_sale.tour.PaymentScreenTourMethods', function (require) {
                 },
             ]
         }
+        clickShipLaterButton() {
+            return [
+                {
+                    content: 'click ship later button',
+                    trigger: '.button:contains("Ship Later")',
+                },
+            ]
+        }
     }
 
     class Check {
@@ -193,6 +201,33 @@ odoo.define('point_of_sale.tour.PaymentScreenTourMethods', function (require) {
                 {
                     content: `total is ${amount}`,
                     trigger: `.total:contains("${amount}")`,
+                    run: () => {},
+                },
+            ];
+        }
+        totalDueIs(amount) {
+            return [
+                {
+                    content: `total due is ${amount}`,
+                    trigger: `.payment-status-total-due:contains("${amount}")`,
+                    run: () => {},
+                },
+            ];
+        }
+        isInvoiceButtonChecked() {
+            return [
+                {
+                    content: 'check invoice button is checked',
+                    trigger: '.js_invoice.highlight',
+                    run: () => {},
+                }
+            ]
+        }
+        isInvoiceButtonNotChecked() {
+            return [
+                {
+                    content: "check invoice button is checked",
+                    trigger: ".js_invoice:not(.highlight)",
                     run: () => {},
                 },
             ];

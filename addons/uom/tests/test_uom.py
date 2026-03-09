@@ -51,7 +51,8 @@ class TestUom(UomCommon):
                 'factor_inv': 1,
                 'uom_type': 'reference',
                 'rounding': 1.0,
-                'category_id': time_category.id
+                'category_id': time_category.id,
+                'active': False,
             })
 
     def test_40_custom_uom(self):
@@ -96,4 +97,13 @@ class TestUom(UomCommon):
                 'uom_type': 'reference',
                 'rounding': 1.0,
                 'category_id': category.id
+            })
+
+    def test_50_check_ratio(self):
+        with self.assertRaises(ValidationError):
+            self.env['uom.uom'].create({
+                'name': 'Custom UoM',
+                'uom_type': 'bigger',
+                'ratio': 0,
+                'category_id': self.env.ref('uom.product_uom_categ_unit').id
             })

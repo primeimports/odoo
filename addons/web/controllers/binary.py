@@ -17,9 +17,9 @@ import odoo
 import odoo.modules.registry
 from odoo import http, _
 from odoo.exceptions import AccessError, UserError
-from odoo.http import request
+from odoo.http import request, Response
 from odoo.modules import get_resource_path
-from odoo.tools import file_open, file_path, replace_exceptions
+from odoo.tools import file_open, file_path, replace_exceptions, str2bool
 from odoo.tools.mimetypes import guess_mimetype
 from odoo.tools.image import image_guess_size_from_field_name
 
@@ -73,7 +73,10 @@ class Binary(http.Controller):
         with replace_exceptions(UserError, by=request.not_found()):
             record = request.env['ir.binary']._find_record(xmlid, model, id and int(id), access_token)
             stream = request.env['ir.binary']._get_stream_from(record, field, filename, filename_field, mimetype)
-        send_file_kwargs = {'as_attachment': download}
+            if request.httprequest.args.get('access_token'):
+                stream.public = True
+
+        send_file_kwargs = {'as_attachment': str2bool(download)}
         if unique:
             send_file_kwargs['immutable'] = True
             send_file_kwargs['max_age'] = http.STATIC_CACHE_LONG
@@ -90,10 +93,12 @@ class Binary(http.Controller):
     # pylint: disable=redefined-builtin,invalid-name
     def content_assets(self, id=None, filename=None, unique=False, extra=None, nocache=False):
         if not id:
+            domain = [('url', '!=', False), ('res_model', '=', 'ir.ui.view'),
+                      ('res_id', '=', 0), ('create_uid', '=', odoo.SUPERUSER_ID)]
             if extra:
-                domain = [('url', '=like', f'/web/assets/%/{extra}/{filename}')]
+                domain += [('url', '=like', f'/web/assets/%/{extra}/{filename}')]
             else:
-                domain = [
+                domain += [
                     ('url', '=like', f'/web/assets/%/{filename}'),
                     ('url', 'not like', f'/web/assets/%/%/{filename}')
                 ]
@@ -105,7 +110,7 @@ class Binary(http.Controller):
             record = request.env['ir.binary']._find_record(res_id=int(id))
             stream = request.env['ir.binary']._get_stream_from(record, 'raw', filename)
 
-        send_file_kwargs = {'as_attachment': False}
+        send_file_kwargs = {'as_attachment': False, 'content_security_policy': None}
         if unique:
             send_file_kwargs['immutable'] = True
             send_file_kwargs['max_age'] = http.STATIC_CACHE_LONG
@@ -142,6 +147,8 @@ class Binary(http.Controller):
                 record, field, filename=filename, filename_field=filename_field,
                 mimetype=mimetype, width=int(width), height=int(height), crop=crop,
             )
+            if request.httprequest.args.get('access_token'):
+                stream.public = True
         except UserError as exc:
             if download:
                 raise request.not_found() from exc
@@ -152,8 +159,9 @@ class Binary(http.Controller):
             stream = request.env['ir.binary']._get_image_stream_from(
                 record, 'raw', width=int(width), height=int(height), crop=crop,
             )
+            stream.public = False
 
-        send_file_kwargs = {'as_attachment': download}
+        send_file_kwargs = {'as_attachment': str2bool(download)}
         if unique:
             send_file_kwargs['immutable'] = True
             send_file_kwargs['max_age'] = http.STATIC_CACHE_LONG
@@ -241,8 +249,14 @@ class Binary(http.Controller):
                         imgext = '.' + mimetype.split('/')[1]
                         if imgext == '.svg+xml':
                             imgext = '.svg'
-                        response = send_file(image_data, request.httprequest.environ,
-                                             download_name=imgname + imgext, mimetype=mimetype, last_modified=row[1])
+                        response = send_file(
+                            image_data,
+                            request.httprequest.environ,
+                            download_name=imgname + imgext,
+                            mimetype=mimetype,
+                            last_modified=row[1],
+                            response_class=Response,
+                        )
                     else:
                         response = http.Stream.from_path(placeholder('nologo.png')).get_response()
             except Exception:

@@ -1,6 +1,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, RedirectWarning, ValidationError
+from odoo.tools.misc import formatLang
 from dateutil.relativedelta import relativedelta
 import logging
 _logger = logging.getLogger(__name__)
@@ -78,9 +79,14 @@ class AccountMove(models.Model):
         # on expo invoice you can mix services and products
         expo_invoice = self.l10n_latam_document_type_id.code in ['19', '20', '21']
 
+        # WSFEX 1668 - If Expo invoice and we have a "IVA Liberado – Ley Nº 19.640" (Zona Franca) partner
+        # then AFIP concept to use should be type "Others (4)"
+        is_zona_franca = self.partner_id.l10n_ar_afip_responsibility_type_id == self.env.ref("l10n_ar.res_IVA_LIB")
         # Default value "product"
         afip_concept = '1'
-        if product_types == service:
+        if expo_invoice and is_zona_franca:
+            afip_concept = '4'
+        elif product_types == service:
             afip_concept = '2'
         elif product_types - consumable and product_types - service and not expo_invoice:
             afip_concept = '3'
@@ -90,8 +96,8 @@ class AccountMove(models.Model):
     def _get_l10n_ar_codes_used_for_inv_and_ref(self):
         """ List of document types that can be used as an invoice and refund. This list can be increased once needed
         and demonstrated. As far as we've checked document types of wsfev1 don't allow negative amounts so, for example
-        document 60 and 61 could not be used as refunds. """
-        return ['99', '186', '188', '189']
+        document 61 could not be used as refunds. """
+        return ['99', '186', '188', '189', '60']
 
     def _get_l10n_latam_documents_domain(self):
         self.ensure_one()
@@ -144,8 +150,12 @@ class AccountMove(models.Model):
             if rec.company_id.currency_id == rec.currency_id:
                 rec.l10n_ar_currency_rate = 1.0
             elif not rec.l10n_ar_currency_rate:
-                rec.l10n_ar_currency_rate = rec.currency_id._convert(
-                    1.0, rec.company_id.currency_id, rec.company_id, rec.date, round=False)
+                rec.l10n_ar_currency_rate = self.env['res.currency']._get_conversion_rate(
+                    from_currency=rec.currency_id,
+                    to_currency=rec.company_id.currency_id,
+                    company=rec.company_id,
+                    date=rec.invoice_date,
+                )
 
     @api.onchange('partner_id')
     def _onchange_afip_responsibility(self):
@@ -166,12 +176,12 @@ class AccountMove(models.Model):
             domain = [('company_id', '=', rec.company_id.id), ('l10n_latam_use_documents', '=', True), ('type', '=', 'sale')]
             journal = self.env['account.journal']
             msg = False
-            if res_code in ['9', '10'] and rec.journal_id.l10n_ar_afip_pos_system not in expo_journals:
-                # if partner is foregin and journal is not of expo, we try to change to expo journal
+            if res_code in ['8', '9', '10'] and rec.journal_id.l10n_ar_afip_pos_system not in expo_journals:
+                # if it is a foreign partner and journal is not for expo, we try to change it to an expo journal
                 journal = journal.search(domain + [('l10n_ar_afip_pos_system', 'in', expo_journals)], limit=1)
                 msg = _('You are trying to create an invoice for foreign partner but you don\'t have an exportation journal')
-            elif res_code not in ['9', '10'] and rec.journal_id.l10n_ar_afip_pos_system in expo_journals:
-                # if partner is NOT foregin and journal is for expo, we try to change to local journal
+            elif res_code not in ['8', '9', '10'] and rec.journal_id.l10n_ar_afip_pos_system in expo_journals:
+                # if it is NOT a foreign partner and journal is for expo, we try to change it to a local journal
                 journal = journal.search(domain + [('l10n_ar_afip_pos_system', 'not in', expo_journals)], limit=1)
                 msg = _('You are trying to create an invoice for domestic partner but you don\'t have a domestic market journal')
             if journal:
@@ -180,6 +190,21 @@ class AccountMove(models.Model):
                 # Throw an error to user in order to proper configure the journal for the type of operation
                 action = self.env.ref('account.action_account_journal_form')
                 raise RedirectWarning(msg, action.id, _('Go to Journals'))
+
+    def _compute_l10n_latam_document_type(self):
+        """We correct the default document type in vendor bills in case the partner is foreign (code 8)
+        so that it is always 'Foreign invoices and receipts'.
+        """
+        super()._compute_l10n_latam_document_type()
+        foreign_vendor_bills = self.filtered(lambda x: (
+            x.company_id.account_fiscal_country_id.code == "AR"
+            and x.state == 'draft'
+            and x.move_type in ['in_invoice', 'in_refund']
+            and x.l10n_latam_document_type_id
+            and x.partner_id.l10n_ar_afip_responsibility_type_id.code == '8'))
+        doctype_fa_exterior = self.env.ref('l10n_ar.fa_exterior', raise_if_not_found=False)
+        if doctype_fa_exterior:
+            foreign_vendor_bills.l10n_latam_document_type_id = doctype_fa_exterior
 
     def _post(self, soft=True):
         ar_invoices = self.filtered(lambda x: x.company_id.account_fiscal_country_id.code == "AR" and x.l10n_latam_use_documents)
@@ -204,7 +229,7 @@ class AccountMove(models.Model):
             })
         return super()._reverse_moves(default_values_list=default_values_list, cancel=cancel)
 
-    @api.onchange('l10n_latam_document_type_id', 'l10n_latam_document_number')
+    @api.onchange('l10n_latam_document_type_id', 'l10n_latam_document_number', 'partner_id')
     def _inverse_l10n_latam_document_number(self):
         super()._inverse_l10n_latam_document_number()
 
@@ -319,10 +344,20 @@ class AccountMove(models.Model):
         return super()._get_name_invoice_report()
 
     def _l10n_ar_get_invoice_totals_for_report(self):
+        """If the invoice document type indicates that vat should not be detailed in the printed report (result of _l10n_ar_include_vat()) then we overwrite tax_totals field so that includes taxes in the total amount, otherwise it would be showing amount_untaxed in the amount_total"""
         self.ensure_one()
         include_vat = self._l10n_ar_include_vat()
         base_lines = self.line_ids.filtered(lambda x: x.display_type == 'product')
         tax_lines = self.line_ids.filtered(lambda x: x.display_type == 'tax')
+
+        involved_tax_group_ids = []
+        for subtotals in self.tax_totals['groups_by_subtotal'].values():
+            for subtotal in subtotals:
+                involved_tax_group_ids.append(subtotal['tax_group_id'])
+        involved_tax_groups = self.env['account.tax.group'].browse(involved_tax_group_ids)
+        nat_int_tax_groups = involved_tax_groups.filtered(lambda tax_group: tax_group.l10n_ar_tribute_afip_code in ('01', '04'))
+        vat_tax_groups = involved_tax_groups.filtered('l10n_ar_vat_afip_code')
+        both_tax_group_ids = nat_int_tax_groups.ids + vat_tax_groups.ids
 
         # Base lines.
         base_line_vals_list = [x._convert_to_tax_base_line_dict() for x in base_lines]
@@ -330,7 +365,7 @@ class AccountMove(models.Model):
             for vals in base_line_vals_list:
                 vals['taxes'] = vals['taxes']\
                     .flatten_taxes_hierarchy()\
-                    .filtered(lambda tax: not tax.tax_group_id.l10n_ar_vat_afip_code)
+                    .filtered(lambda tax: tax.tax_group_id.id not in both_tax_group_ids)
 
         # Tax lines.
         tax_line_vals_list = [x._convert_to_tax_line_dict() for x in tax_lines]
@@ -338,14 +373,53 @@ class AccountMove(models.Model):
             tax_line_vals_list = [
                 x
                 for x in tax_line_vals_list
-                if not x['tax_repartition_line'].tax_id.tax_group_id.l10n_ar_vat_afip_code
+                if x['tax_repartition_line'].tax_id.tax_group_id.id not in both_tax_group_ids
             ]
 
-        return self.env['account.tax']._prepare_tax_totals(
+        tax_totals = self.env['account.tax']._prepare_tax_totals(
             base_line_vals_list,
             self.currency_id,
             tax_lines=tax_line_vals_list,
         )
+
+        temp = self.tax_totals
+        if include_vat:
+            tax_totals['amount_total'] = temp['amount_total']
+            tax_totals['formatted_amount_total'] = temp['formatted_amount_total']
+
+        # RG 5614/2024: Show ARCA VAT and Other National Internal Taxes
+        if self.l10n_latam_document_type_id.code in ['6', '7', '8']:
+
+            # Prepare the subtotals to show in the report
+            currency_symbol = self.currency_id.symbol
+            detail_info = {
+                'vat_taxes': {'name': _("VAT Content %s", currency_symbol), 'tax_amount': 0.0, 'group': 'vat'},
+                'other_taxes': {'name': _("Other National Ind. Taxes %s", currency_symbol), 'tax_amount': 0.0,
+                                'group': 'other'},
+            }
+
+            for subtotals in temp['groups_by_subtotal'].values():
+                for subtotal in subtotals:
+                    tax_group_id = subtotal['tax_group_id']
+                    if tax_group_id in nat_int_tax_groups.ids:
+                        key = 'other_taxes'
+                    elif tax_group_id in vat_tax_groups.ids:
+                        key = 'vat_taxes'
+                    else:
+                        continue  # If not belongs to the needed groups we ignore them
+
+                    detail_info[key]["tax_amount"] += subtotal['tax_group_amount']
+
+            if detail_info['other_taxes']["tax_amount"] == 0.0:
+                detail_info.pop('other_taxes')
+
+            # Format the amounts to show in the report
+            for _item, values in detail_info.items():
+                values["formatted_amount_tax"] = formatLang(self.env, values["tax_amount"])
+
+            tax_totals["detail_ar_tax"] = list(detail_info.values())
+
+        return tax_totals
 
     def _l10n_ar_include_vat(self):
         self.ensure_one()

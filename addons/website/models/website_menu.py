@@ -4,7 +4,8 @@
 import werkzeug.exceptions
 import werkzeug.urls
 
-from odoo import api, fields, models
+from odoo import api, fields, models, _
+from odoo.exceptions import UserError
 from odoo.http import request
 from odoo.tools.translate import html_translate
 
@@ -113,14 +114,21 @@ class Menu(models.Model):
                                                                 ('id', '!=', menu.id)])
         return super(Menu, menus_to_remove).unlink()
 
+    @api.ondelete(at_uninstall=False)
+    def _unlink_except_master_tags(self):
+        main_menu = self.env.ref('website.main_menu', raise_if_not_found=False)
+        if main_menu and main_menu in self:
+            raise UserError(_("You cannot delete this website menu as this serves as the default parent menu for new websites (e.g., /shop, /event, ...)."))
+
     def _compute_visible(self):
         for menu in self:
             visible = True
-            if (menu.page_id and not menu.user_has_groups('base.group_user')
-                and (not menu.page_id.sudo().is_visible
-                     or (not menu.page_id.view_id._handle_visibility(do_raise=False)
-                         and menu.page_id.view_id._get_cached_visibility() != "password"))):
-                visible = False
+            if menu.page_id and not menu.user_has_groups('base.group_user'):
+                page_sudo = menu.page_id.sudo()
+                if (not page_sudo.is_visible
+                    or (not page_sudo.view_id._handle_visibility(do_raise=False)
+                        and page_sudo.view_id._get_cached_visibility() != "password")):
+                    visible = False
             menu.is_visible = visible
 
     @api.model

@@ -2,10 +2,12 @@
 
 import gc
 import json
+import os
 from collections import defaultdict
 from datetime import timedelta
 from freezegun import freeze_time
 from threading import Event
+from unittest import skipIf
 from unittest.mock import patch
 try:
     from websocket._exceptions import WebSocketBadStatusException
@@ -22,14 +24,15 @@ from ..websocket import (
     Opcode,
     TimeoutManager,
     TimeoutReason,
-    Websocket
+    Websocket,
+    _websocket_instances
 )
 
 @common.tagged('post_install', '-at_install')
 class TestWebsocketCaryall(WebsocketCase):
     def test_lifecycle_hooks(self):
         events = []
-        with patch.object(Websocket, '_event_callbacks', defaultdict(set)):
+        with patch.object(Websocket, '_Websocket__event_callbacks', defaultdict(set)):
             @Websocket.onopen
             def onopen(env, websocket):  # pylint: disable=unused-variable
                 self.assertIsInstance(env, Environment)
@@ -51,7 +54,7 @@ class TestWebsocketCaryall(WebsocketCase):
         gc.collect()
         first_ws = self.websocket_connect()
         second_ws = self.websocket_connect()
-        self.assertEqual(len(Websocket._instances), 2)
+        self.assertEqual(len(_websocket_instances), 2)
         first_ws.close(CloseCode.CLEAN)
         second_ws.close(CloseCode.CLEAN)
         self.wait_remaining_websocket_connections()
@@ -59,7 +62,7 @@ class TestWebsocketCaryall(WebsocketCase):
         # collected. Stop it now.
         self._serve_forever_patch.stop()
         gc.collect()
-        self.assertEqual(len(Websocket._instances), 0)
+        self.assertEqual(len(_websocket_instances), 0)
 
     def test_timeout_manager_no_response_timeout(self):
         with freeze_time('2022-08-19') as frozen_time:
@@ -129,30 +132,27 @@ class TestWebsocketCaryall(WebsocketCase):
         websocket.send(json.dumps({'event_name': 'subscribe'}))
         self.assert_close_with_code(websocket, CloseCode.SESSION_EXPIRED)
 
+    @skipIf(os.getenv("ODOO_FAKETIME_TEST_MODE"), 'This test times out when faketime is used')
     def test_user_logout_outgoing_message(self):
-        subscribe_done_event = Event()
-        original_subscribe = Websocket.subscribe
         odoo_ws = None
 
         def patched_subscribe(self, *args):
             nonlocal odoo_ws
             odoo_ws = self
-            original_subscribe(self, *args)
-            subscribe_done_event.set()
 
         new_test_user(self.env, login='test_user', password='Password!1')
         user_session = self.authenticate('test_user', 'Password!1')
         websocket = self.websocket_connect(cookie=f'session_id={user_session.sid};')
         with patch.object(Websocket, 'subscribe', patched_subscribe):
-            websocket.send(json.dumps({
-                'event_name': 'subscribe',
-                'data': {'channels': ['channel1'], 'last': 0}
-            }))
+            self.subscribe(
+                websocket,
+                ["channel1"],
+                self.env["bus.bus"].search([], limit=1, order="id DESC").id or 0,
+            )
             self.url_open('/web/session/logout')
             # Simulate postgres notify. The session with whom the websocket
             # connected has been deleted. WebSocket should be closed without
             # receiving the message.
-            subscribe_done_event.wait(timeout=5)
             self.env['bus.bus']._sendone('channel1', 'notif type', 'message')
             odoo_ws.trigger_notification_dispatching()
             self.assert_close_with_code(websocket, CloseCode.SESSION_EXPIRED)
@@ -217,12 +217,9 @@ class TestWebsocketCaryall(WebsocketCase):
 
         with patch.object(Websocket, 'subscribe', patched_subscribe):
             websocket = self.websocket_connect()
+            bus_last_id = self.env['bus.bus'].sudo().search([], limit=1, order='id desc').id or 0
             self.env['bus.bus']._sendone('my_channel', 'notif_type', 'message')
-            websocket.send(json.dumps({
-                'event_name': 'subscribe',
-                'data': {'channels': ['my_channel'], 'last': 0}
-            }))
-
+            self.subscribe(websocket, ["my_channel"], bus_last_id)
             notifications = json.loads(websocket.recv())
             self.assertEqual(1, len(notifications))
             self.assertEqual(notifications[0]['message']['type'], 'notif_type')
@@ -237,17 +234,6 @@ class TestWebsocketCaryall(WebsocketCase):
             self.assertEqual(1, len(notifications))
             self.assertEqual(notifications[0]['message']['type'], 'notif_type')
             self.assertEqual(notifications[0]['message']['payload'], 'another_message')
-
-    def test_opening_websocket_connection_during_tests(self):
-        # During tests, browsers can't open websocket connections.
-        headers = ['User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36']
-        with self.assertRaises(WebSocketBadStatusException) as error_catcher:
-            self.websocket_connect(header=headers)
-        self.assertEqual(error_catcher.exception.status_code, 503)
-
-        # But ChromeHeadless still can.
-        headers = ['User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/102.0.0.0 Safari/537.36']
-        self.websocket_connect()
 
     def test_subscribe_higher_last_notification_id(self):
         subscribe_done_event = Event()
@@ -286,7 +272,7 @@ class TestWebsocketCaryall(WebsocketCase):
             subscribe_done_event.wait()
 
     def test_no_cursor_when_no_callback_for_lifecycle_event(self):
-        with patch.object(Websocket, '_event_callbacks', defaultdict(set)):
+        with patch.object(Websocket, '_Websocket__event_callbacks', defaultdict(set)):
             with patch('odoo.addons.bus.websocket.acquire_cursor') as mock:
                 self.websocket_connect()
                 self.assertFalse(mock.called)

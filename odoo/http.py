@@ -167,8 +167,10 @@ from .service import security, model as service_model
 from .tools import (config, consteq, date_utils, file_path, parse_version,
                     profiler, submap, unique, ustr,)
 from .tools.geoipresolver import GeoIPResolver
+from .tools.facade import Proxy, ProxyAttr, ProxyFunc
 from .tools.func import filter_kwargs, lazy_property
 from .tools.mimetypes import guess_mimetype
+from .tools.misc import pickle
 from .tools._vendor import sessions
 from .tools._vendor.useragents import UserAgent
 
@@ -186,6 +188,9 @@ mimetypes.add_type('application/vnd.ms-fontobject', '.eot')
 mimetypes.add_type('application/x-font-ttf', '.ttf')
 # Add potentially wrong (detected on windows) svg mime types
 mimetypes.add_type('image/svg+xml', '.svg')
+# this one can be present on windows with the value 'text/plain' which
+# breaks loading js files from an addon's static folder
+mimetypes.add_type('text/javascript', '.js')
 
 # To remove when corrected in Babel
 babel.core.LOCALE_ALIASES['nb'] = 'nb_NO'
@@ -216,10 +221,6 @@ def get_default_session():
         'login': None,
         'uid': None,
         'session_token': None,
-        # profiling
-        'profile_session': None,
-        'profile_collectors': None,
-        'profile_params': None,
     }
 
 # The request mimetypes that transport JSON in their body.
@@ -264,9 +265,10 @@ if parse_version(werkzeug.__version__) >= parse_version('2.0.2'):
     # let's add the websocket key only when appropriate.
     ROUTING_KEYS.add('websocket')
 
-# The duration of a user session before it is considered expired,
-# three months.
-SESSION_LIFETIME = 60 * 60 * 24 * 90
+# The default duration of a user session cookie. Inactive sessions are reaped
+# server-side as well with a threshold that can be set via an optional
+# config parameter `sessions.max_inactivity_seconds` (default: SESSION_LIFETIME)
+SESSION_LIFETIME = 60 * 60 * 24 * 7
 
 # The cache duration for static content from the filesystem, one week.
 STATIC_CACHE = 60 * 60 * 24 * 7
@@ -283,10 +285,25 @@ STATIC_CACHE_LONG = 60 * 60 * 24 * 365
 class SessionExpiredException(Exception):
     pass
 
-def content_disposition(filename):
-    return "attachment; filename*=UTF-8''{}".format(
-        url_quote(filename, safe='')
+
+def content_disposition(filename, disposition_type='attachment'):
+    """
+    Craft a ``Content-Disposition`` header, see :rfc:`6266`.
+
+    :param filename: The name of the file, should that file be saved on
+        disk by the browser.
+    :param disposition_type: Tell the browser what to do with the file,
+        either ``"attachment"`` to save the file on disk,
+        either ``"inline"`` to display the file.
+    """
+    if disposition_type not in ('attachment', 'inline'):
+        e = f"Invalid disposition_type: {disposition_type!r}"
+        raise ValueError(e)
+    return "{}; filename*=UTF-8''{}".format(
+        disposition_type,
+        url_quote(filename, safe='', unsafe='()<>@,;:"/[]?={}\\*\'%') # RFC6266
     )
+
 
 def db_list(force=False, host=None):
     """
@@ -401,6 +418,7 @@ def send_file(filepath_or_fp, mimetype=None, as_attachment=False, filename=None,
         last_modified=mtime,
         etag=add_etags,
         max_age=cache_timeout,
+        response_class=Response,
         conditional=conditional
     )
 
@@ -434,23 +452,36 @@ class Stream:
     max_age = None
     immutable = False
     size = None
+    public = False
 
     def __init__(self, **kwargs):
+        # Remove class methods from the instances
+        self.from_path = self.from_attachment = self.from_binary_field = None
         self.__dict__.update(kwargs)
 
     @classmethod
-    def from_path(cls, path, filter_ext=('',)):
-        """ Create a :class:`~Stream`: from an addon resource. """
+    def from_path(cls, path, filter_ext=('',), public=False):
+        """
+        Create a :class:`~Stream`: from an addon resource.
+
+        :param path: See :func:`~odoo.tools.file_path`
+        :param filter_ext: See :func:`~odoo.tools.file_path`
+        :param bool public: Advertise the resource as being cachable by
+            intermediate proxies, otherwise only let the browser caches
+            it.
+        """
         path = file_path(path, filter_ext)
         check = adler32(path.encode())
         stat = os.stat(path)
         return cls(
             type='path',
             path=path,
+            mimetype=mimetypes.guess_type(path)[0],
             download_name=os.path.basename(path),
             etag=f'{int(stat.st_mtime)}-{stat.st_size}-{check}',
             last_modified=stat.st_mtime,
             size=stat.st_size,
+            public=public,
         )
 
     @classmethod
@@ -461,8 +492,8 @@ class Stream:
         self = cls(
             mimetype=attachment.mimetype,
             download_name=attachment.name,
-            conditional=True,
             etag=attachment.checksum,
+            public=attachment.public,
         )
 
         if attachment.store_fname:
@@ -490,7 +521,7 @@ class Stream:
                 host=request.httprequest.environ.get('HTTP_HOST', '')
             )
             if static_path:
-                self = cls.from_path(static_path)
+                self = cls.from_path(static_path, public=True)
             else:
                 self.type = 'url'
                 self.url = attachment.url
@@ -505,14 +536,28 @@ class Stream:
     @classmethod
     def from_binary_field(cls, record, field_name):
         """ Create a :class:`~Stream`: from a binary field. """
-        data_b64 = record[field_name]
-        data = base64.b64decode(data_b64) if data_b64 else b''
+        data = record[field_name] or b''
+
+        # Image fields enforce base64 encoding. Binary fields don't
+        # enforce anything: raw bytes are fine, expected even.
+        # People nonetheless write base64 encoded bytes inside binary
+        # fields, and expect automatic decoding when read, crazy!
+        with contextlib.suppress(ValueError):
+            data = base64.b64decode(
+                # Some libs add linefeed every X (where X < 79) char in
+                # the base64, for email mime. validate=True would raise
+                # an error for those linefeeds so stip them.
+                data.replace(b'\r', b'').replace(b'\n', b''),
+                validate=True,
+            )
+
         return cls(
             type='data',
             data=data,
             etag=request.env['ir.attachment']._compute_checksum(data),
             last_modified=record['__last_update'] if record._log_access else None,
             size=len(data),
+            public=record.env.user._is_public()  # good enough
         )
 
     def read(self):
@@ -526,16 +571,27 @@ class Stream:
         with open(self.path, 'rb') as file:
             return file.read()
 
-    def get_response(self, as_attachment=None, immutable=None, **send_file_kwargs):
+    def get_response(
+        self,
+        as_attachment=None,
+        immutable=None,
+        content_security_policy="default-src 'none'",
+        **send_file_kwargs
+    ):
         """
         Create the corresponding :class:`~Response` for the current stream.
 
         :param bool as_attachment: Indicate to the browser that it
             should offer to save the file instead of displaying it.
-        :param bool immutable: Add the ``immutable`` directive to the
-            ``Cache-Control`` response header, allowing intermediary
-            proxies to aggressively cache the response. This option
-            also set the ``max-age`` directive to 1 year.
+        :param bool|None immutable: Add the ``immutable`` directive to
+            the ``Cache-Control`` response header, allowing intermediary
+            proxies to aggressively cache the response. This option also
+            set the ``max-age`` directive to 1 year.
+        :param str|None content_security_policy: Optional value for the
+            ``Content-Security-Policy`` (CSP) header. This header is
+            used by browsers to allow/restrict the downloaded resource
+            to itself perform new http requests. By default CSP is set
+            to ``"default-scr 'none'"`` which restrict all requests.
         :param send_file_kwargs: Other keyword arguments to send to
             :func:`odoo.tools._vendor.send_file.send_file` instead of
             the stream sensitive values. Discouraged.
@@ -565,28 +621,37 @@ class Stream:
         }
 
         if self.type == 'data':
-            return _send_file(BytesIO(self.data), **send_file_kwargs)
+            res = _send_file(BytesIO(self.data), **send_file_kwargs)
+        else:  # self.type == 'path'
+            send_file_kwargs['use_x_sendfile'] = False
+            if config['x_sendfile']:
+                with contextlib.suppress(ValueError):  # outside of the filestore
+                    fspath = Path(self.path).relative_to(opj(config['data_dir'], 'filestore'))
+                    x_accel_redirect = f'/web/filestore/{fspath}'
+                    send_file_kwargs['use_x_sendfile'] = True
 
-        # self.type == 'path'
-        send_file_kwargs['use_x_sendfile'] = False
-        if config['x_sendfile']:
-            with contextlib.suppress(ValueError):  # outside of the filestore
-                fspath = Path(self.path).relative_to(opj(config['data_dir'], 'filestore'))
-                x_accel_redirect = f'/web/filestore/{fspath}'
-                send_file_kwargs['use_x_sendfile'] = True
+            res = _send_file(self.path, **send_file_kwargs)
+            if 'X-Sendfile' in res.headers:
+                res.headers['X-Accel-Redirect'] = x_accel_redirect
 
-        res = _send_file(self.path, **send_file_kwargs)
+                # In case of X-Sendfile/X-Accel-Redirect, the body is empty,
+                # yet werkzeug gives the length of the file. This makes
+                # NGINX wait for content that'll never arrive.
+                res.headers['Content-Length'] = '0'
 
-        if immutable and res.cache_control:
-            res.cache_control["immutable"] = None  # None sets the directive
+        res.headers['X-Content-Type-Options'] = 'nosniff'
 
-        if 'X-Sendfile' in res.headers:
-            res.headers['X-Accel-Redirect'] = x_accel_redirect
+        if content_security_policy:  # see also Application.set_csp()
+            res.headers['Content-Security-Policy'] = content_security_policy
 
-            # In case of X-Sendfile/X-Accel-Redirect, the body is empty,
-            # yet werkzeug gives the length of the file. This makes
-            # NGINX wait for content that'll never arrive.
-            res.headers['Content-Length'] = '0'
+        if self.public:
+            if (res.cache_control.max_age or 0) > 0:
+                res.cache_control.public = True
+        else:
+            res.cache_control.pop('public', '')
+            res.cache_control.private = True
+        if immutable:
+            res.cache_control['immutable'] = None  # None sets the directive
 
         return res
 
@@ -682,7 +747,7 @@ def route(route=None, **routing):
         # Sanitize the routing
         assert routing.get('type', 'http') in _dispatchers.keys()
         if route:
-            routing['routes'] = route if isinstance(route, list) else [route]
+            routing['routes'] = [route] if isinstance(route, str) else route
         wrong = routing.pop('method', None)
         if wrong is not None:
             _logger.warning("%s defined with invalid routing parameter 'method', assuming 'methods'", fname)
@@ -826,6 +891,8 @@ class FilesystemSessionStore(sessions.FilesystemSessionStore):
     """ Place where to load and save session objects. """
     def get_session_filename(self, sid):
         # scatter sessions across 256 directories
+        if not self.is_valid_key(sid):
+            raise ValueError(f'Invalid session id {sid!r}')
         sha_dir = sid[:2]
         dirname = os.path.join(self.path, sha_dir)
         session_path = os.path.join(dirname, sid)
@@ -860,8 +927,8 @@ class FilesystemSessionStore(sessions.FilesystemSessionStore):
         session.should_rotate = False
         self.save(session)
 
-    def vacuum(self):
-        threshold = time.time() - SESSION_LIFETIME
+    def vacuum(self, max_lifetime=SESSION_LIFETIME):
+        threshold = time.time() - max_lifetime
         for fname in glob.iglob(os.path.join(root.session_store.path, '*', '*')):
             path = os.path.join(root.session_store.path, fname)
             with contextlib.suppress(OSError):
@@ -871,14 +938,14 @@ class FilesystemSessionStore(sessions.FilesystemSessionStore):
 
 class Session(collections.abc.MutableMapping):
     """ Structure containing data persisted across requests. """
-    __slots__ = ('can_save', 'data', 'is_dirty', 'is_explicit', 'is_new',
+    __slots__ = ('can_save', '_Session__data', 'is_dirty', 'is_new',
                  'should_rotate', 'sid')
 
     def __init__(self, data, sid, new=False):
         self.can_save = True
-        self.data = data
+        self.__data = {}
+        self.update(data)
         self.is_dirty = False
-        self.is_explicit = False
         self.is_new = new
         self.should_rotate = False
         self.sid = sid
@@ -890,22 +957,23 @@ class Session(collections.abc.MutableMapping):
         if item == 'geoip':
             warnings.warn('request.session.geoip have been moved to request.geoip', DeprecationWarning)
             return request.geoip if request else {}
-        return self.data[item]
+        return self.__data[item]
 
     def __setitem__(self, item, value):
-        if item not in self.data or self.data[item] != value:
+        value = pickle.loads(pickle.dumps(value))
+        if item not in self.__data or self.__data[item] != value:
             self.is_dirty = True
-        self.data[item] = value
+        self.__data[item] = value
 
     def __delitem__(self, item):
-        del self.data[item]
+        del self.__data[item]
         self.is_dirty = True
 
     def __len__(self):
-        return len(self.data)
+        return len(self.__data)
 
     def __iter__(self):
-        return iter(self.data)
+        return iter(self.__data)
 
     def __getattr__(self, attr):
         return self.get(attr, None)
@@ -917,7 +985,7 @@ class Session(collections.abc.MutableMapping):
             self[key] = val
 
     def clear(self):
-        self.data.clear()
+        self.__data.clear()
         self.is_dirty = True
 
     #
@@ -963,6 +1031,8 @@ class Session(collections.abc.MutableMapping):
             # Like update_env(user=request.session.uid) but works when uid is None
             request.env = odoo.api.Environment(request.env.cr, self.uid, self.context)
             request.update_context(**self.context)
+            # request env needs to be able to access the latest changes from the auth layers
+            request.env.cr.commit()
 
         return pre_uid
 
@@ -979,6 +1049,7 @@ class Session(collections.abc.MutableMapping):
 
         self.should_rotate = True
         self.update({
+            'db': env.registry.db_name,
             'login': login,
             'uid': uid,
             'context': user_context,
@@ -1015,7 +1086,51 @@ def borrow_request():
         _request_stack.push(req)
 
 
-class Response(werkzeug.wrappers.Response):
+def make_request_wrap_methods(attr):
+    def getter(self):
+        return getattr(self._HTTPRequest__wrapped, attr)
+
+    def setter(self, value):
+        return setattr(self._HTTPRequest__wrapped, attr, value)
+
+    return getter, setter
+
+
+class HTTPRequest:
+    def __init__(self, environ):
+        httprequest = werkzeug.wrappers.Request(environ)
+        httprequest.user_agent_class = UserAgent  # use vendored userAgent since it will be removed in 2.1
+        httprequest.parameter_storage_class = werkzeug.datastructures.ImmutableMultiDict
+        httprequest.max_form_memory_size = 10 * 1024 * 1024  # 10 MB
+        self._session_id__ = httprequest.cookies.get('session_id')
+
+        self.__wrapped = httprequest
+        self.__environ = self.__wrapped.environ
+        self.environ = self.headers.environ = {
+            key: value
+            for key, value in self.__environ.items()
+            if (not key.startswith(('werkzeug.', 'wsgi.', 'socket')) or key in ['wsgi.url_scheme', 'werkzeug.proxy_fix.orig'])
+        }
+
+    def __enter__(self):
+        return self
+
+
+HTTPREQUEST_ATTRIBUTES = [
+    '__str__', '__repr__', '__exit__',
+    'accept_charsets', 'accept_languages', 'accept_mimetypes', 'access_route', 'args', 'authorization', 'base_url',
+    'charset', 'content_encoding', 'content_length', 'content_md5', 'content_type', 'cookies', 'data', 'date',
+    'encoding_errors', 'files', 'form', 'full_path', 'get_data', 'get_json', 'headers', 'host', 'host_url', 'if_match',
+    'if_modified_since', 'if_none_match', 'if_range', 'if_unmodified_since', 'is_json', 'is_secure', 'json', 'method',
+    'mimetype', 'mimetype_params', 'origin', 'path', 'pragma', 'query_string', 'range', 'referrer', 'remote_addr',
+    'remote_user', 'root_path', 'root_url', 'scheme', 'script_root', 'server', 'session', 'trusted_hosts', 'url',
+    'url_charset', 'url_root', 'user_agent', 'values',
+]
+for attr in HTTPREQUEST_ATTRIBUTES:
+    setattr(HTTPRequest, attr, property(*make_request_wrap_methods(attr)))
+
+
+class _Response(werkzeug.wrappers.Response):
     """
     Outgoing HTTP response with body, status, headers and qweb support.
     In addition to the :class:`werkzeug.wrappers.Response` parameters,
@@ -1105,6 +1220,166 @@ class Response(werkzeug.wrappers.Response):
         super().set_cookie(key, value=value, max_age=max_age, expires=expires, path=path, domain=domain, secure=secure, httponly=httponly, samesite=samesite)
 
 
+class Headers(Proxy):
+    _wrapped__ = werkzeug.datastructures.Headers
+
+    __getitem__ = ProxyFunc()
+    __repr__ = ProxyFunc(str)
+    __setitem__ = ProxyFunc(None)
+    __str__ = ProxyFunc(str)
+    __contains__ = ProxyFunc(bool)
+    add = ProxyFunc(None)
+    add_header = ProxyFunc(None)
+    clear = ProxyFunc(None)
+    copy = ProxyFunc(lambda v: Headers(v))  # noqa: PLW0108
+    extend = ProxyFunc(None)
+    get = ProxyFunc()
+    get_all = ProxyFunc()
+    getlist = ProxyFunc()
+    items = ProxyFunc()
+    keys = ProxyFunc()
+    pop = ProxyFunc()
+    popitem = ProxyFunc()
+    remove = ProxyFunc(None)
+    set = ProxyFunc(None)
+    setdefault = ProxyFunc()
+    to_wsgi_list = ProxyFunc()
+    values = ProxyFunc()
+    if hasattr(werkzeug.datastructures.Headers, "setlist"):
+        # werkzeug >= 1.0
+        setlist = ProxyFunc(None)
+        setlistdefault = ProxyFunc()
+        update = ProxyFunc(None)
+
+
+class ResponseCacheControl(Proxy):
+    _wrapped__ = werkzeug.datastructures.ResponseCacheControl
+
+    __getitem__ = ProxyFunc()
+    __setitem__ = ProxyFunc(None)
+    immutable = ProxyAttr(bool)
+    max_age = ProxyAttr(int)
+    must_revalidate = ProxyAttr(bool)
+    no_cache = ProxyAttr(bool)
+    no_store = ProxyAttr(bool)
+    no_transform = ProxyAttr(bool)
+    public = ProxyAttr(bool)
+    private = ProxyAttr(bool)
+    proxy_revalidate = ProxyAttr(bool)
+    s_maxage = ProxyAttr(int)
+    pop = ProxyFunc()
+
+
+class ResponseStream(Proxy):
+    _wrapped__ = werkzeug.wrappers.ResponseStream
+
+    write = ProxyFunc(int)
+    writelines = ProxyFunc(None)
+    tell = ProxyFunc(int)
+
+
+class Response(Proxy):
+    _wrapped__ = _Response
+
+    # werkzeug.wrappers.Response attributes
+    __call__ = ProxyFunc()
+    add_etag = ProxyFunc(None)
+    age = ProxyAttr()
+    autocorrect_location_header = ProxyAttr(bool)
+    cache_control = ProxyAttr(ResponseCacheControl)
+    call_on_close = ProxyFunc()
+    charset = ProxyAttr(str)
+    content_encoding = ProxyAttr(str)
+    content_length = ProxyAttr(int)
+    content_location = ProxyAttr(str)
+    content_md5 = ProxyAttr(str)
+    content_type = ProxyAttr(str)
+    data = ProxyAttr()
+    default_mimetype = ProxyAttr(str)
+    default_status = ProxyAttr(int)
+    delete_cookie = ProxyFunc(None)
+    direct_passthrough = ProxyAttr(bool)
+    expires = ProxyAttr()
+    force_type = ProxyFunc(lambda v: Response(v))  # noqa: PLW0108
+    freeze = ProxyFunc(None)
+    get_data = ProxyFunc()
+    get_etag = ProxyFunc()
+    headers = ProxyAttr(Headers)
+    is_json = ProxyAttr(bool)
+    is_sequence = ProxyAttr(bool)
+    is_streamed = ProxyAttr(bool)
+    iter_encoded = ProxyFunc()
+    json = ProxyAttr()
+    last_modified = ProxyAttr()
+    location = ProxyAttr(str)
+    make_conditional = ProxyFunc(lambda v: Response(v))  # noqa: PLW0108
+    make_sequence = ProxyFunc(None)
+    max_cookie_size = ProxyAttr(int)
+    mimetype = ProxyAttr(str)
+    response = ProxyAttr()
+    retry_after = ProxyAttr()
+    set_cookie = ProxyFunc(None)
+    set_data = ProxyFunc(None)
+    set_etag = ProxyFunc(None)
+    status = ProxyAttr(str)
+    status_code = ProxyAttr(int)
+    stream = ProxyAttr(ResponseStream)
+    if hasattr(_Response, "get_json"):
+        # werkzeug >= 2.3.0
+        get_json = ProxyFunc()
+
+    # odoo.http._response attributes
+    load = ProxyFunc()
+    set_default = ProxyFunc(None)
+    qcontext = ProxyAttr()
+    template = ProxyAttr(str)
+    is_qweb = ProxyAttr(bool)
+    render = ProxyFunc()
+    flatten = ProxyFunc(None)
+
+    def __init__(self, *args, **kwargs):
+        response = None
+        if len(args) == 1:
+            arg = args[0]
+            if isinstance(arg, Response):
+                response = arg._wrapped__
+            elif isinstance(arg, _Response):
+                response = arg
+            elif isinstance(arg, werkzeug.wrappers.Response):
+                response = _Response.load(arg)
+        if response is None:
+            response = _Response(*args, **kwargs)
+
+        super().__init__(response)
+        if 'set_cookie' in response.__dict__:
+            self.__dict__['set_cookie'] = response.__dict__['set_cookie']
+
+
+__wz_get_response = HTTPException.get_response
+
+
+def get_response(self, environ=None, scope=None):
+    if scope is None:  # compatible with werkzeug 0.16.x
+        return Response(__wz_get_response(self, environ))
+    else:
+        return Response(__wz_get_response(self, environ, scope))  # werkzeug 2.0.2
+
+
+HTTPException.get_response = get_response
+
+
+werkzeug_abort = werkzeug.exceptions.abort
+
+
+def abort(status, *args, **kwargs):
+    if isinstance(status, Response):
+        status = status._wrapped__
+    werkzeug_abort(status, *args, **kwargs)
+
+
+werkzeug.exceptions.abort = abort
+
+
 class FutureResponse:
     """
     werkzeug.Response mock class that only serves as placeholder for
@@ -1116,6 +1391,10 @@ class FutureResponse:
 
     def __init__(self):
         self.headers = werkzeug.datastructures.Headers()
+
+    @property
+    def _charset(self):
+        return self.charset
 
     @functools.wraps(werkzeug.Response.set_cookie)
     def set_cookie(self, key, value='', max_age=None, expires=None, path='/', domain=None, secure=False, httponly=False, samesite=None, cookie_type='required'):
@@ -1142,27 +1421,15 @@ class Request:
 
     def _post_init(self):
         self.session, self.db = self._get_session_and_dbname()
+        self._post_init = None
 
     def _get_session_and_dbname(self):
-        # The session is explicit when it comes from the query-string or
-        # the header. It is implicit when it comes from the cookie or
-        # that is does not exist yet. The explicit session should be
-        # used in this request only, it should not be saved on the
-        # response cookie.
-        sid = (self.httprequest.args.get('session_id')
-            or self.httprequest.headers.get("X-Openerp-Session-Id"))
-        if sid:
-            is_explicit = True
-        else:
-            sid = self.httprequest.cookies.get('session_id')
-            is_explicit = False
-
-        if sid is None:
+        sid = self.httprequest._session_id__
+        if not sid or not root.session_store.is_valid_key(sid):
             session = root.session_store.new()
         else:
             session = root.session_store.get(sid)
             session.sid = sid  # in case the session was not persisted
-        session.is_explicit = is_explicit
 
         for key, val in get_default_session().items():
             session.setdefault(key, val)
@@ -1259,6 +1526,22 @@ class Request:
             self.session.is_dirty = was_dirty
         return self.session._geoip
 
+    @lazy_property
+    def best_lang(self):
+        lang = self.httprequest.accept_languages.best
+        if not lang:
+            return None
+
+        try:
+            code, territory, _, _ = babel.core.parse_locale(lang, sep='-')
+            if territory:
+                lang = f'{code}_{territory}'
+            else:
+                lang = babel.core.LOCALE_ALIASES[code]
+            return lang
+        except (ValueError, KeyError):
+            return None
+
     # =====================================================
     # Helpers
     # =====================================================
@@ -1321,19 +1604,7 @@ class Request:
         :returns: Preferred language if specified or 'en_US'
         :rtype: str
         """
-        lang = self.httprequest.accept_languages.best
-        if not lang:
-            return DEFAULT_LANG
-
-        try:
-            code, territory, _, _ = babel.core.parse_locale(lang, sep='-')
-            if territory:
-                lang = f'{code}_{territory}'
-            else:
-                lang = babel.core.LOCALE_ALIASES[code]
-            return lang
-        except (ValueError, KeyError):
-            return DEFAULT_LANG
+        return self.best_lang or DEFAULT_LANG
 
     def _geoip_resolve(self):
         if not (root.geoip_resolver and self.httprequest.remote_addr):
@@ -1354,7 +1625,6 @@ class Request:
             **self.httprequest.form,
             **self.httprequest.files
         }
-        params.pop('session_id', None)
         return params
 
     def get_json_data(self):
@@ -1386,7 +1656,7 @@ class Request:
                         profile_session=self.session.profile_session,
                         collectors=self.session.profile_collectors,
                         params=self.session.profile_params,
-                    )
+                    )._get_cm_proxy()
                 except Exception:
                     _logger.exception("Failure during Profiler creation")
                     self.session.profile_session = None
@@ -1451,7 +1721,7 @@ class Request:
         if isinstance(location, URL):
             location = location.to_url()
         if local:
-            location = '/' + url_parse(location).replace(scheme='', netloc='').to_url().lstrip('/')
+            location = '/' + url_parse(location).replace(scheme='', netloc='').to_url().lstrip('/\\')
         if self.db:
             return self.env['ir.http']._redirect(location, code)
         return werkzeug.utils.redirect(location, code, Response=Response)
@@ -1493,17 +1763,8 @@ class Request:
             sess['_geoip'] = self.geoip
             root.session_store.save(sess)
 
-        # We must not set the cookie if the session id was specified
-        # using a http header or a GET parameter.
-        # There are two reasons to this:
-        # - When using one of those two means we consider that we are
-        #   overriding the cookie, which means creating a new session on
-        #   top of an already existing session and we don't want to
-        #   create a mess with the 'normal' session (the one using the
-        #   cookie). That is a special feature of the Javascript Session.
-        # - It could allow session fixation attacks.
         cookie_sid = self.httprequest.cookies.get('session_id')
-        if not sess.is_explicit and (sess.is_dirty or cookie_sid != sess.sid):
+        if sess.is_dirty or cookie_sid != sess.sid:
             self.future_response.set_cookie('session_id', sess.sid, max_age=SESSION_LIFETIME, httponly=True)
 
     def _set_request_dispatcher(self, rule):
@@ -1528,9 +1789,16 @@ class Request:
         try:
             directory = root.statics[module]
             filepath = werkzeug.security.safe_join(directory, path)
-            return Stream.from_path(filepath).get_response(
-                max_age=0 if 'assets' in self.session.debug else STATIC_CACHE,
+            debug = (
+                'assets' in self.session.debug and
+                ' wkhtmltopdf ' not in self.httprequest.user_agent.string
             )
+            res = Stream.from_path(filepath, public=True).get_response(
+                max_age=0 if debug else STATIC_CACHE,
+                content_security_policy=None,
+            )
+            root.set_csp(res)
+            return res
         except KeyError:
             raise NotFound(f'Module "{module}" not found.\n')
         except OSError:  # cover both missing file and invalid permissions
@@ -1556,6 +1824,7 @@ class Request:
         """
         try:
             self.registry = Registry(self.db).check_signaling()
+            threading.current_thread().dbname = self.registry.db_name
         except (AttributeError, psycopg2.OperationalError, psycopg2.ProgrammingError):
             # psycopg2 error or attribute error while constructing
             # the registry. That means either
@@ -1580,9 +1849,8 @@ class Request:
             except Exception as exc:
                 if isinstance(exc, HTTPException) and exc.code is None:
                     raise  # bubble up to odoo.http.Application.__call__
-                if 'werkzeug' in config['dev_mode'] and self.dispatcher.routing_type != 'json':
-                    raise  # bubble up to werkzeug.debug.DebuggedApplication
-                exc.error_response = self.registry['ir.http']._handle_error(exc)
+                if not hasattr(exc, 'error_response'):
+                    exc.error_response = self.registry['ir.http']._handle_error(exc)
                 raise
 
     def _serve_ir_http(self):
@@ -1606,7 +1874,8 @@ class Request:
         ir_http._authenticate(rule.endpoint)
         ir_http._pre_dispatch(rule, args)
         response = self.dispatcher.dispatch(rule.endpoint, args)
-        ir_http._post_dispatch(response)
+        # the registry can have been reniewed by dispatch
+        self.registry['ir.http']._post_dispatch(response)
         return response
 
 
@@ -1679,7 +1948,7 @@ class Dispatcher(ABC):
         root.set_csp(response)
 
     @abstractmethod
-    def handle_error(self, exc):
+    def handle_error(self, exc: Exception) -> collections.abc.Callable:
         """
         Transform the exception into a valid HTTP response. Called upon
         any exception while serving a request.
@@ -1722,7 +1991,7 @@ class HttpDispatcher(Dispatcher):
         else:
             return endpoint(**self.request.params)
 
-    def handle_error(self, exc):
+    def handle_error(self, exc: Exception) -> collections.abc.Callable:
         """
         Handle any exception that occurred while dispatching a request
         to a `type='http'` route. Also handle exceptions that occurred
@@ -1731,14 +2000,14 @@ class HttpDispatcher(Dispatcher):
         json.
 
         :param Exception exc: the exception that occurred.
-        :returns: an HTTP error response
-        :rtype: :class:`werkzeug.wrapper.Response`
+        :returns: a WSGI application
         """
         if isinstance(exc, SessionExpiredException):
             session = self.request.session
+            was_connected = session.uid is not None
             session.logout(keep_db=True)
             response = self.request.redirect_query('/web/login', {'redirect': self.request.httprequest.full_path})
-            if not session.is_explicit:
+            if was_connected:
                 root.session_store.rotate(session, self.request.env)
                 response.set_cookie('session_id', session.sid, max_age=SESSION_LIFETIME, httponly=True)
             return response
@@ -1756,6 +2025,7 @@ class JsonRPCDispatcher(Dispatcher):
     def __init__(self, request):
         super().__init__(request)
         self.jsonrequest = {}
+        self.request_id = None
 
     @classmethod
     def is_compatible_with(cls, request):
@@ -1793,8 +2063,13 @@ class JsonRPCDispatcher(Dispatcher):
         """
         try:
             self.jsonrequest = self.request.get_json_data()
+            self.request_id = self.jsonrequest.get('id')
         except ValueError as exc:
-            raise BadRequest("Invalid JSON data") from exc
+            # must use abort+Response to bypass handle_error
+            werkzeug.exceptions.abort(Response("Invalid JSON data", status=400))
+        except AttributeError as exc:
+            # must use abort+Response to bypass handle_error
+            werkzeug.exceptions.abort(Response("Invalid JSON-RPC data", status=400))
 
         self.request.params = dict(self.jsonrequest.get('params', {}), **args)
         ctx = self.request.params.pop('context', None)
@@ -1807,16 +2082,15 @@ class JsonRPCDispatcher(Dispatcher):
             result = endpoint(**self.request.params)
         return self._response(result)
 
-    def handle_error(self, exc):
+    def handle_error(self, exc: Exception) -> collections.abc.Callable:
         """
         Handle any exception that occurred while dispatching a request to
         a `type='json'` route. Also handle exceptions that occurred when
         no route matched the request path, that no fallback page could
         be delivered and that the request ``Content-Type`` was json.
 
-        :param exc Exception: the exception that occurred.
-        :returns: an HTTP error response
-        :rtype: Response
+        :param exc: the exception that occurred.
+        :returns: a WSGI application
         """
         error = {
             'code': 200,  # this code is the JSON-RPC level code, it is
@@ -1836,8 +2110,7 @@ class JsonRPCDispatcher(Dispatcher):
         return self._response(error=error)
 
     def _response(self, result=None, error=None):
-        request_id = self.jsonrequest.get('id')
-        response = {'jsonrpc': '2.0', 'id': request_id}
+        response = {'jsonrpc': '2.0', 'id': self.request_id}
         if error is not None:
             response['error'] = error
         if result is not None:
@@ -1907,7 +2180,7 @@ class Application:
         for url, endpoint in _generate_routing_rules([''] + odoo.conf.server_wide_modules, nodb_only=True):
             routing = submap(endpoint.routing, ROUTING_KEYS)
             if routing['methods'] is not None and 'OPTIONS' not in routing['methods']:
-                routing['methods'] = routing['methods'] + ['OPTIONS']
+                routing['methods'] = [*routing['methods'], 'OPTIONS']
             rule = werkzeug.routing.Rule(url, endpoint=endpoint, **routing)
             rule.merge_slashes = False
             nodb_routing_map.add(rule)
@@ -1959,6 +2232,10 @@ class Application:
         current_thread.query_count = 0
         current_thread.query_time = 0
         current_thread.perf_t0 = time.time()
+        if hasattr(current_thread, 'dbname'):
+            del current_thread.dbname
+        if hasattr(current_thread, 'uid'):
+            del current_thread.uid
 
         if odoo.tools.config['proxy_mode'] and environ.get("HTTP_X_FORWARDED_HOST"):
             # The ProxyFix middleware has a side effect of updating the
@@ -1969,57 +2246,50 @@ class Application:
                 return
             ProxyFix(fake_app)(environ, fake_start_response)
 
-        httprequest = werkzeug.wrappers.Request(environ)
-        httprequest.user_agent_class = UserAgent  # use vendored userAgent since it will be removed in 2.1
-        httprequest.parameter_storage_class = (
-            werkzeug.datastructures.ImmutableOrderedMultiDict)
-        request = Request(httprequest)
-        _request_stack.push(request)
-        request._post_init()
-        current_thread.url = httprequest.url
+        with HTTPRequest(environ) as httprequest:
+            request = Request(httprequest)
+            _request_stack.push(request)
 
-        try:
-            if self.get_static_file(httprequest.path):
-                response = request._serve_static()
-            elif request.db:
-                with request._get_profiler_context_manager():
-                    response = request._serve_db()
-            else:
-                response = request._serve_nodb()
-            return response(environ, start_response)
+            try:
+                request._post_init()
+                current_thread.url = httprequest.url
 
-        except Exception as exc:
-            # Valid (2xx/3xx) response returned via werkzeug.exceptions.abort.
-            if isinstance(exc, HTTPException) and exc.code is None:
-                response = exc.get_response()
-                HttpDispatcher(request).post_dispatch(response)
+                if self.get_static_file(httprequest.path):
+                    response = request._serve_static()
+                elif request.db:
+                    with request._get_profiler_context_manager():
+                        response = request._serve_db()
+                else:
+                    response = request._serve_nodb()
                 return response(environ, start_response)
 
-            # Logs the error here so the traceback starts with ``__call__``.
-            if hasattr(exc, 'loglevel'):
-                _logger.log(exc.loglevel, exc, exc_info=getattr(exc, 'exc_info', None))
-            elif isinstance(exc, HTTPException):
-                pass
-            elif isinstance(exc, SessionExpiredException):
-                _logger.info(exc)
-            elif isinstance(exc, (UserError, AccessError, NotFound)):
-                _logger.warning(exc)
-            else:
-                _logger.error("Exception during request handling.", exc_info=True)
+            except Exception as exc:
+                # Valid (2xx/3xx) response returned via werkzeug.exceptions.abort.
+                if isinstance(exc, HTTPException) and exc.code is None:
+                    response = exc.get_response()
+                    HttpDispatcher(request).post_dispatch(response)
+                    return response(environ, start_response)
 
-            # Server is running with --dev=werkzeug, bubble the error up
-            # to werkzeug so he can fire up a debugger.
-            if 'werkzeug' in config['dev_mode'] and request.dispatcher.routing_type != 'json':
-                raise
+                # Logs the error here so the traceback starts with ``__call__``.
+                if hasattr(exc, 'loglevel'):
+                    _logger.log(exc.loglevel, exc, exc_info=getattr(exc, 'exc_info', None))
+                elif isinstance(exc, HTTPException):
+                    pass
+                elif isinstance(exc, SessionExpiredException):
+                    _logger.info(exc)
+                elif isinstance(exc, (UserError, AccessError)):
+                    _logger.warning(exc)
+                else:
+                    _logger.error("Exception during request handling.", exc_info=True)
 
-            # Ensure there is always a Response attached to the exception.
-            if not hasattr(exc, 'error_response'):
-                exc.error_response = request.dispatcher.handle_error(exc)
+                # Ensure there is always a WSGI handler attached to the exception.
+                if not hasattr(exc, 'error_response'):
+                    exc.error_response = request.dispatcher.handle_error(exc)
 
-            return exc.error_response(environ, start_response)
+                return exc.error_response(environ, start_response)
 
-        finally:
-            _request_stack.pop()
+            finally:
+                _request_stack.pop()
 
 
 root = Application()

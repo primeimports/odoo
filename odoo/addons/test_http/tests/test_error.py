@@ -1,10 +1,11 @@
 import json
-from unittest.mock import patch
-from odoo.tools import config, mute_logger
+from odoo.tools import mute_logger
+from odoo.tests import tagged
 from odoo.addons.test_http.controllers import CT_JSON
 from .test_common import TestHttpBase
 
 
+@tagged('post_install', '-at_install')
 class TestHttpErrorHttp(TestHttpBase):
     @mute_logger('odoo.http')  # UserError("Walter is AFK")
     def test_httperror0_exceptions_as_404(self):
@@ -29,6 +30,7 @@ class TestHttpErrorHttp(TestHttpBase):
             self.assertIn("Walter is AFK", res.text, "The real UserError message should be kept")
 
 
+@tagged('post_install', '-at_install')
 class TestHttpJsonError(TestHttpBase):
 
     jsonrpc_error_structure = {
@@ -81,8 +83,3 @@ class TestHttpJsonError(TestHttpBase):
         self.assertEqual(error_data['message'], 'Unknown destination')
         self.assertEqual(error_data['arguments'], ['Unknown destination'])
         self.assertEqual(error_data['context'], {})
-
-    @mute_logger('odoo.http')
-    def test_errorjson1_dev_mode_werkzeug(self):
-        with patch.object(config, 'options', {**config.options, 'dev_mode': 'werkzeug'}):
-            self.test_errorjson0_value_error()

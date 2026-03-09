@@ -22,35 +22,7 @@ registerModel({
          * @param {MouseEvent} ev
          */
         async onClick(ev) {
-            if (ev.target.closest('.o_channel_redirect')) {
-                // avoid following dummy href
-                ev.preventDefault();
-                const channel = this.messaging.models['Thread'].insert({
-                    id: Number(ev.target.dataset.oeId),
-                    model: 'mail.channel',
-                });
-                if (!channel.isPinned) {
-                    await channel.join();
-                    channel.update({ isServerPinned: true });
-                }
-                channel.open();
-                return;
-            } else if (ev.target.closest('.o_mail_redirect')) {
-                ev.preventDefault();
-                this.messaging.openChat({
-                    partnerId: Number(ev.target.dataset.oeId)
-                });
-                return;
-            }
-            if (ev.target.tagName === 'A') {
-                if (ev.target.dataset.oeId && ev.target.dataset.oeModel) {
-                    // avoid following dummy href
-                    ev.preventDefault();
-                    this.messaging.openProfile({
-                        id: Number(ev.target.dataset.oeId),
-                        model: ev.target.dataset.oeModel,
-                    });
-                }
+            if (await this.messaging.handleClickOnLink(ev)) {
                 return;
             }
             if (
@@ -74,7 +46,11 @@ registerModel({
          */
         onClickAuthorAvatar(ev) {
             markEventHandled(ev, 'Message.ClickAuthorAvatar');
+            if (!this.message.author || !this.hasAuthorClickable) {
+                return;
+            }
             if (!this.hasAuthorOpenChat) {
+                this.message.author.openProfile();
                 return;
             }
             this.message.author.openChat();
@@ -84,7 +60,11 @@ registerModel({
          */
         onClickAuthorName(ev) {
             markEventHandled(ev, 'Message.ClickAuthorName');
-            if (!this.message.author) {
+            if (!this.message.author || !this.hasAuthorClickable) {
+                return;
+            }
+            if (!this.hasAuthorOpenChat) {
+                this.message.author.openProfile();
                 return;
             }
             this.message.author.openChat();
@@ -210,7 +190,11 @@ registerModel({
         }),
         authorTitleText: attr({
             compute() {
-                return this.hasAuthorOpenChat ? this.env._t("Open chat") : '';
+                return this.hasAuthorOpenChat
+                    ? this.env._t("Open chat")
+                    : this.hasAuthorClickable
+                        ? this.env._t("Open profile")
+                        : '';
             },
         }),
         clockWatcher: one('ClockWatcher', {
@@ -315,6 +299,11 @@ registerModel({
                     return false;
                 }
                 return true;
+            },
+        }),
+        hasAuthorClickable: attr({
+            compute() {
+                return this.hasAuthorOpenChat;
             },
         }),
         /**

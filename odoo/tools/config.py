@@ -16,7 +16,8 @@ from . import appdirs
 
 from passlib.context import CryptContext
 crypt_context = CryptContext(schemes=['pbkdf2_sha512', 'plaintext'],
-                             deprecated=['plaintext'])
+                             deprecated=['plaintext'],
+                             pbkdf2_sha512__rounds=600_000)
 
 class MyOption (optparse.Option, object):
     """ optparse Option with two additional attributes.
@@ -77,7 +78,7 @@ class configmanager(object):
             'publisher_warranty_url': 'http://services.openerp.com/publisher-warranty/',
             'reportgz': False,
             'root_path': None,
-            'websocket_keep_alive_timeout': 600,
+            'websocket_keep_alive_timeout': 3600,
             'websocket_rate_limit_burst': 10,
             'websocket_rate_limit_delay': 0.2,
         }
@@ -123,6 +124,9 @@ class configmanager(object):
         group.add_option("--upgrade-path", dest="upgrade_path",
                          help="specify an additional upgrade path.",
                          action="callback", callback=self._check_upgrade_path, nargs=1, type="string")
+        group.add_option("--pre-upgrade-scripts", dest="pre_upgrade_scripts", my_default="",
+                         help="Run specific upgrade scripts before loading any module when -u is provided.",
+                         action="callback", callback=self._check_scripts, nargs=1, type="string")
         group.add_option("--load", dest="server_wide_modules", help="Comma-separated list of server-wide modules.", my_default='base,web')
 
         group.add_option("-D", "--data-dir", dest="data_dir", my_default=_get_default_datadir(),
@@ -173,7 +177,7 @@ class configmanager(object):
                          help="Enable unit tests.")
         group.add_option("--test-tags", dest="test_tags",
                          help="Comma-separated list of specs to filter which tests to execute. Enable unit tests if set. "
-                         "A filter spec has the format: [-][tag][/module][:class][.method] "
+                         "A filter spec has the format: [-][tag][/module][:class][.method][[params]] "
                          "The '-' specifies if we want to include or exclude tests matching this spec. "
                          "The tag will match tags added on a class with a @tagged decorator "
                          "(all Test classes have 'standard' and 'at_install' tags "
@@ -183,6 +187,9 @@ class configmanager(object):
                          "If tag is omitted on exclude mode, its value is '*'. "
                          "The module, class, and method will respectively match the module name, test class name and test method name. "
                          "Example: --test-tags :TestClass.test_func,/test_module,external "
+                         "It is also possible to provide parameters to a test method that supports them"
+                         "Example: --test-tags /web.test_js[mail]"
+                         "If negated, a test-tag with parameter will negate the parameter when passing it to the test"
 
                          "Filtering and executing the tests happens twice: right "
                          "after each module installation/update and at the end "
@@ -293,7 +300,7 @@ class configmanager(object):
         group = optparse.OptionGroup(parser, "Advanced options")
         group.add_option('--dev', dest='dev_mode', type="string",
                          help="Enable developer mode. Param: List of options separated by comma. "
-                              "Options : all, [pudb|wdb|ipdb|pdb], reload, qweb, werkzeug, xml")
+                              "Options : all, reload, qweb, xml")
         group.add_option('--shell-interface', dest='shell_interface', type="string",
                          help="Specify a preferred REPL to use in shell mode. Supported REPLs are: "
                               "[ipython|ptpython|bpython|python]")
@@ -312,6 +319,10 @@ class configmanager(object):
                          type="float")
         group.add_option("--max-cron-threads", dest="max_cron_threads", my_default=2,
                          help="Maximum number of threads processing concurrently cron jobs (default 2).",
+                         type="int")
+        group.add_option("--limit-time-worker-cron", dest="limit_time_worker_cron", my_default=0,
+                         help="Maximum time a cron thread/worker stays alive before it is restarted. "
+                              "Set to 0 to disable. (default: 0)",
                          type="int")
         group.add_option("--unaccent", dest="unaccent", my_default=False, action="store_true",
                          help="Try to enable the unaccent extension when creating new databases.")
@@ -453,10 +464,11 @@ class configmanager(object):
                 'db_port', 'db_template', 'logfile', 'pidfile', 'smtp_port',
                 'email_from', 'smtp_server', 'smtp_user', 'smtp_password', 'from_filter',
                 'smtp_ssl_certificate_filename', 'smtp_ssl_private_key_filename',
-                'db_maxconn', 'import_partial', 'addons_path', 'upgrade_path',
+                'db_maxconn', 'import_partial', 'addons_path', 'upgrade_path', 'pre_upgrade_scripts',
                 'syslog', 'without_demo', 'screencasts', 'screenshots',
                 'dbfilter', 'log_level', 'log_db',
-                'log_db_level', 'geoip_database', 'dev_mode', 'shell_interface'
+                'log_db_level', 'geoip_database', 'dev_mode', 'shell_interface',
+                'limit_time_worker_cron',
         ]
 
         for arg in keys:
@@ -516,12 +528,21 @@ class configmanager(object):
         else:
             self.options['addons_path'] = ",".join(
                 self._normalize(x)
-                for x in self.options['addons_path'].split(','))
+                for x in self.options['addons_path'].split(',')
+                if x.strip())
 
         self.options["upgrade_path"] = (
             ",".join(self._normalize(x)
-                for x in self.options['upgrade_path'].split(','))
+                for x in self.options['upgrade_path'].split(',')
+                if x.strip())
             if self.options['upgrade_path']
+            else ""
+        )
+        self.options["pre_upgrade_scripts"] = (
+            ",".join(self._normalize(x)
+                for x in self.options['pre_upgrade_scripts'].split(',')
+                if x.strip())
+            if self.options['pre_upgrade_scripts']
             else ""
         )
 
@@ -532,8 +553,8 @@ class configmanager(object):
         self.options['translate_modules'] = opt.translate_modules and [m.strip() for m in opt.translate_modules.split(',')] or ['all']
         self.options['translate_modules'].sort()
 
-        dev_split = opt.dev_mode and  [s.strip() for s in opt.dev_mode.split(',')] or []
-        self.options['dev_mode'] = 'all' in dev_split and dev_split + ['pdb', 'reload', 'qweb', 'werkzeug', 'xml'] or dev_split
+        dev_split = [s.strip() for s in opt.dev_mode.split(',')] if opt.dev_mode else []
+        self.options['dev_mode'] = dev_split + (['reload', 'qweb', 'xml'] if 'all' in dev_split else [])
 
         if opt.pg_path:
             self.options['pg_path'] = opt.pg_path
@@ -591,6 +612,18 @@ class configmanager(object):
             ad_paths.append(res)
 
         setattr(parser.values, option.dest, ",".join(ad_paths))
+
+    def _check_scripts(self, option, opt, value, parser):
+        pre_upgrade_scripts = []
+        for path in value.split(','):
+            path = path.strip()
+            res = self._normalize(path)
+            if not os.path.isfile(res):
+                raise optparse.OptionValueError("option %s: no such file: %r" % (opt, path))
+            if res not in pre_upgrade_scripts:
+                pre_upgrade_scripts.append(res)
+        setattr(parser.values, option.dest, ",".join(pre_upgrade_scripts))
+
 
     def _check_upgrade_path(self, option, opt, value, parser):
         upgrade_path = []
@@ -658,7 +691,7 @@ class configmanager(object):
         for opt in sorted(self.options):
             if keys is not None and opt not in keys:
                 continue
-            if opt in ('version', 'language', 'translate_out', 'translate_in', 'overwrite_existing_translations', 'init', 'update'):
+            if opt in ('version', 'language', 'translate_out', 'translate_in', 'overwrite_existing_translations', 'init', 'update', 'demo'):
                 continue
             if opt in self.blacklist_for_save:
                 continue

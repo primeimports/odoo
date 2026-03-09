@@ -27,11 +27,19 @@
         }, {
             trigger: ".o_kanban_record .o_kanban_record_title:contains('Test Lead 1')",
             content: "move to won stage",
-            run: "drag_and_drop_native .o_opportunity_kanban .o_kanban_group:eq(3) "
+            run: "drag_and_drop_native .o_opportunity_kanban .o_kanban_group:has(.o_column_title:contains('Won')) "
         }, {
             trigger: ".o_reward_rainbow",
             extra_trigger: ".o_reward_rainbow",
             run: function () {} // check rainbowman is properly displayed
+        }, {
+            // This step and the following simulates the fact that after drag and drop,
+            // from the previous steps, a click event is triggered on the window element,
+            // which closes the currently shown .o_kanban_quick_create.
+            trigger: ".o_kanban_renderer",
+        }, {
+            trigger: ".o_kanban_renderer:not(:has(.o_kanban_quick_create))",
+            run() {},
         }, {
             trigger: ".o-kanban-button-new",
             content: "create second lead",

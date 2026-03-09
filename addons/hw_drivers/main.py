@@ -5,6 +5,7 @@ import json
 import platform
 import logging
 import socket
+import subprocess
 from threading import Thread
 import time
 import urllib3
@@ -12,6 +13,12 @@ import urllib3
 from odoo.addons.hw_drivers.tools import helpers
 
 _logger = logging.getLogger(__name__)
+
+try:
+    import schedule
+except ImportError:
+    schedule = None
+    _logger.warning('Could not import library schedule')
 
 try:
     from dbus.mainloop.glib import DBusGMainLoop
@@ -41,7 +48,7 @@ class Manager(Thread):
                 'identifier': helpers.get_mac_address(),
                 'ip': domain,
                 'token': helpers.get_token(),
-                'version': helpers.get_version(),
+                'version': helpers.get_version(detailed_version=True),
             }
             devices_list = {}
             for device in iot_devices:
@@ -66,9 +73,8 @@ class Manager(Thread):
                         'Accept': 'text/plain',
                     },
                 )
-            except Exception as e:
-                _logger.error('Could not reach configured server')
-                _logger.error('A error encountered : %s ' % e)
+            except Exception:
+                _logger.exception('Could not reach configured server to send all IoT devices')
         else:
             _logger.warning('Odoo server not set')
 
@@ -78,9 +84,17 @@ class Manager(Thread):
         """
 
         helpers.start_nginx_server()
-        if platform.system() == 'Linux':
+        if platform.system() == 'Linux' and not helpers.get_odoo_server_url():
+            self.migrate_config()
+
+        _logger.info("IoT Box Image version: %s", helpers.get_version(detailed_version=True))
+        if platform.system() == 'Linux' and helpers.get_odoo_server_url():
             helpers.check_git_branch()
-        helpers.check_certificate()
+            helpers.generate_password()
+        is_certificate_ok, certificate_details = helpers.get_certificate_status()
+        if not is_certificate_ok:
+            _logger.warning("An error happened when trying to get the HTTPS certificate: %s",
+                            certificate_details)
 
         # We first add the IoT Box to the connected DB because IoT handlers cannot be downloaded if
         # the identifier of the Box is not found in the DB. So add the Box to the DB.
@@ -90,9 +104,15 @@ class Manager(Thread):
 
         # Start the interfaces
         for interface in interfaces.values():
-            i = interface()
-            i.daemon = True
-            i.start()
+            try:
+                i = interface()
+                i.daemon = True
+                i.start()
+            except Exception:
+                _logger.exception("Interface %s could not be started", str(interface))
+
+        # Set scheduled actions
+        schedule and schedule.every().day.at("00:00").do(helpers.get_certificate_status)
 
         # Check every 3 secondes if the list of connected devices has changed and send the updated
         # list to the connected DB.
@@ -103,9 +123,21 @@ class Manager(Thread):
                     self.previous_iot_devices = iot_devices.copy()
                     self.send_alldevices()
                 time.sleep(3)
+                schedule and schedule.run_pending()
             except Exception:
                 # No matter what goes wrong, the Manager loop needs to keep running
-                _logger.error(format_exc())
+                _logger.exception("Manager loop unexpected error")
+
+    def migrate_config(self):
+        """
+        This is a workaround for new IoT box images (>=24.10) not working correctly after
+        checking out a v16 database. It transforms the new odoo.conf settings into their
+        equivalent config files.
+        """
+        with helpers.writable():
+            subprocess.run(
+                ['/home/pi/odoo/addons/point_of_sale/tools/posbox/configuration/migrate_config.sh'], check=True
+            )
 
 # Must be started from main thread
 if DBusGMainLoop:

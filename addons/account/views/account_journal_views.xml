@@ -17,6 +17,7 @@
                     <field name="default_account_id" optional="show"/>
                     <field name="active" optional="hide"/>
                     <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+                    <field name="company_id" groups="!base.group_multi_company" invisible="1"/>
                 </tree>
             </field>
         </record>
@@ -63,12 +64,9 @@
                                                attrs="{'invisible': [('type', '!=', 'sale')]}" groups="account.group_account_readonly"/>
                                         <label for="default_account_id" string="Default Expense Account"
                                                attrs="{'invisible': [('type', '!=', 'purchase')]}" groups="account.group_account_readonly"/>
-                                        <label for="default_account_id" string="Default Account"
-                                               help="If set, this account is used to automatically balance entries."
-                                               attrs="{'invisible': [('type', '!=', 'general')]}" groups="account.group_account_readonly"/>
                                         <field name="default_account_id" nolabel="1"
                                                attrs="{'required': ['|', '&amp;', ('id', '!=', False), ('type', 'in', ('bank', 'cash')), ('type', 'in', ('sale', 'purchase'))],
-                                                       'invisible': [('type', '=', False)]}"
+                                                       'invisible': [('type', 'in', (False, 'general'))]}"
                                                options="{'no_quick_create': True}"
                                                groups="account.group_account_readonly"/>
                                         <field name="suspense_account_id"
@@ -147,7 +145,7 @@
                                     </group>
                                     <group class="oe_edit_only" name="group_alias_edit" string="Create Invoices upon Emails" attrs="{'invisible': ['|', ('type', 'not in',  ('sale' ,'purchase')), ('alias_domain', '=', False)]}">
                                         <label string="Email Alias" for="alias_name"/>
-                                        <div class="oe_inline" name="edit_alias" style="display: inline;" >
+                                        <div class="oe_inline" name="edit_alias" style="display: inline;" dir="ltr">
                                             <field name="alias_name" class="oe_inline"/>@<field name="alias_domain" class="oe_inline" readonly="1"/>
                                         </div>
                                     </group>

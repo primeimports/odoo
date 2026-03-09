@@ -30,6 +30,9 @@ odoo.define('pos_restaurant.SplitBillScreen', function(require) {
                 this.render();
             });
         }
+        get disallow() {
+            return false;
+        }
         get currentOrder() {
             return this.env.pos.get_order();
         }
@@ -92,26 +95,20 @@ odoo.define('pos_restaurant.SplitBillScreen', function(require) {
         }
         _splitQuantity(line) {
             const split = this.splitlines[line.id];
+            const lineQty = line.get_quantity();
 
-            let totalQuantity = 0;
-
-            this.env.pos.get_order().get_orderlines().forEach(function(orderLine) {
-                if(orderLine.get_product().id === split.product)
-                    totalQuantity += orderLine.get_quantity();
-            });
-
-            if(line.get_quantity() > 0) {
+            if(lineQty > 0) {
                 if (!line.get_unit().is_pos_groupable) {
-                    if (split.quantity !== line.get_quantity()) {
-                        split.quantity = line.get_quantity();
+                    if (split.quantity !== lineQty) {
+                        split.quantity = lineQty;
                     } else {
                         split.quantity = 0;
                     }
                 } else {
-                    if (split.quantity < totalQuantity) {
+                    if (split.quantity < lineQty) {
                         split.quantity += line.get_unit().is_pos_groupable? 1: line.get_unit().rounding;
-                        if (split.quantity > line.get_quantity()) {
-                            split.quantity = line.get_quantity();
+                        if (split.quantity > lineQty) {
+                            split.quantity = lineQty;
                         }
                     } else {
                         split.quantity = 0;
@@ -159,7 +156,7 @@ odoo.define('pos_restaurant.SplitBillScreen', function(require) {
                 var split = this.splitlines[id];
                 var line = this.currentOrder.get_orderline(parseInt(id));
 
-                if(!this.props.disallow) {
+                if(!this.disallow) {
                     line.set_quantity(
                         line.get_quantity() - split.quantity,
                         'do not recompute unit price'

@@ -7,15 +7,16 @@
 # Piia Paurson <piia@avalah.ee>, 2022
 # Eneli Õigus <enelioigus@gmail.com>, 2022
 # Leaanika Randmets, 2022
+# JanaAvalah, 2023
 # 
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server 16.0beta\n"
+"Project-Id-Version: Odoo Server 16.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2022-10-04 09:25+0000\n"
+"POT-Creation-Date: 2024-02-06 13:32+0000\n"
 "PO-Revision-Date: 2022-09-22 05:55+0000\n"
-"Last-Translator: Leaanika Randmets, 2022\n"
-"Language-Team: Estonian (https://www.transifex.com/odoo/teams/41243/et/)\n"
+"Last-Translator: JanaAvalah, 2023\n"
+"Language-Team: Estonian (https://app.transifex.com/odoo/teams/41243/et/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
@@ -30,14 +31,14 @@ msgid "Add product mode"
 msgstr "Lisa toote lisamise viis"
 
 #. module: sale_product_matrix
-#. openerp-web
+#. odoo-javascript
 #: code:addons/sale_product_matrix/static/src/js/sale_product_field.js:0
 #, python-format
 msgid "Choose Product Variants"
 msgstr "Vali toote variatsioonid"
 
 #. module: sale_product_matrix
-#. openerp-web
+#. odoo-javascript
 #: code:addons/sale_product_matrix/static/src/js/sale_product_field.js:0
 #, python-format
 msgid "Close"
@@ -55,7 +56,7 @@ msgstr ""
 "Võrgustik: vali mitu variatsiooni korraga võrk vaates."
 
 #. module: sale_product_matrix
-#. openerp-web
+#. odoo-javascript
 #: code:addons/sale_product_matrix/static/src/js/sale_product_field.js:0
 #, python-format
 msgid "Confirm"
@@ -74,7 +75,7 @@ msgstr "Võrgustiku uuendamine"
 #. module: sale_product_matrix
 #: model:ir.model.fields,field_description:sale_product_matrix.field_sale_order__grid
 msgid "Matrix local storage"
-msgstr ""
+msgstr "Maatriksi lokaalne salvestusruum"
 
 #. module: sale_product_matrix
 #: model:ir.model.fields.selection,name:sale_product_matrix.selection__product_template__product_add_mode__matrix
@@ -117,9 +118,10 @@ msgid ""
 "Technical local storage of grid. \n"
 "If grid_update, will be loaded on the SO.\n"
 "If not, represents the matrix to open."
-msgstr ""
+msgstr "Võrgu tehniline kohalik salvestamine."
 
 #. module: sale_product_matrix
+#. odoo-python
 #: code:addons/sale_product_matrix/models/sale_order.py:0
 #, python-format
 msgid ""

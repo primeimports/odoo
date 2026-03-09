@@ -16,11 +16,53 @@ class MailTestPortal(models.Model):
 
     name = fields.Char()
     partner_id = fields.Many2one('res.partner', 'Customer')
+    user_id = fields.Many2one(comodel_name='res.users', string="Salesperson")
+
+    def _compute_access_url(self):
+        super()._compute_access_url()
+        for record in self.filtered('id'):
+            record.access_url = '/my/test_portal/%s' % self.id
+
+
+class MailTestPortalNoPartner(models.Model):
+    """ A model inheriting from portal, but without any partner field """
+    _description = 'Chatter Model for Portal (no partner field)'
+    _name = 'mail.test.portal.no.partner'
+    _inherit = [
+        'mail.thread',
+        'portal.mixin',
+    ]
+
+    name = fields.Char()
 
     def _compute_access_url(self):
         self.access_url = False
         for record in self.filtered('id'):
-            record.access_url = '/my/test_portal/%s' % self.id
+            record.access_url = '/my/test_portal_no_partner/%s' % self.id
+
+
+class MailTestPortalPublicAccessAction(models.Model):
+    """ Test 'public' target_type access action """
+    _description = 'Portal Public Access Action'
+    _name = 'mail.test.portal.public.access.action'
+    _inherit = 'mail.test.portal'
+
+    def _compute_access_url(self):
+        super()._compute_access_url()
+        for record in self.filtered('id'):
+            record.access_url = f'/test_portal/public_type/{record.id}'
+
+    def _get_access_action(self, access_uid=None, force_website=False):
+        # Test 'public' target type for portal / public people
+        if self.env.user.share or force_website:
+            return {
+                'type': 'ir.actions.act_url',
+                'url': self.access_url,
+                'target': 'self',
+                'target_type': 'public',
+                'res_id': self.id,
+            }
+        return super()._get_access_action(access_uid=access_uid, force_website=force_website)
 
 
 class MailTestRating(models.Model):
@@ -69,6 +111,9 @@ class MailTestRating(models.Model):
                 rating.phone_nbr = rating.customer_id.phone
             elif not rating.phone_nbr:
                 rating.phone_nbr = False
+
+    def _mail_get_partner_fields(self):
+        return ['customer_id']
 
     def _rating_apply_get_default_subtype_id(self):
         return self.env['ir.model.data']._xmlid_to_res_id("test_mail_full.mt_mail_test_rating_rating_done")

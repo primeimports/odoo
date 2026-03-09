@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from odoo.exceptions import UserError
+from odoo.exceptions import UserError, ValidationError
 from odoo.tests.common import TransactionCase, Form
 
 
@@ -519,7 +519,7 @@ class TestMultiCompany(TransactionCase):
         supplier_location = self.env.ref('stock.stock_location_suppliers')
         intercom_location = self.env.ref('stock.stock_location_inter_wh')
         intercom_location.write({'active': True})
-        partner = self.env['res.partner'].create({'name': 'Deco Addict'})
+        partner = self.env['res.partner'].create({'name': 'Acme Corporation'})
         self.warehouse_a.resupply_wh_ids = [(6, 0, [self.warehouse_b.id])]
         resupply_route = self.env['stock.route'].search([('supplier_wh_id', '=', self.warehouse_b.id),
                                                                   ('supplied_wh_id', '=', self.warehouse_a.id)])
@@ -615,3 +615,32 @@ class TestMultiCompany(TransactionCase):
         self.assertEqual(lot_a.name, 'lot a')
         self.assertEqual(lot_b.company_id, self.company_b)
         self.assertEqual(lot_b.name, 'lot b')
+
+    def test_route_rules_company_consistency(self):
+        route = self.env['stock.route'].create({
+            'name': 'Test Route',
+            'company_id': self.company_a.id,
+            'rule_ids': [
+                (0, 0, {
+                    'name': 'Buy',
+                    'action': 'pull_push',
+                    'company_id': self.company_a.id,
+                    'location_dest_id': self.stock_location_a.id,
+                    'picking_type_id': self.warehouse_a.in_type_id.id,
+                })
+            ]
+        })
+
+        with self.assertRaises(ValidationError):
+            route.write({'company_id': self.company_b.id})
+
+        with self.assertRaises(ValidationError):
+            route.write({'rule_ids': [
+                (0, 0, {
+                    'name': 'Buy',
+                    'action': 'pull_push',
+                    'company_id': self.company_b.id,
+                    'location_dest_id': self.stock_location_b.id,
+                    'picking_type_id': self.warehouse_b.in_type_id.id,
+                })
+            ]})

@@ -41,6 +41,14 @@ export class DateRangeField extends Component {
                     window.$(el).on("show.daterangepicker", this.onPickerShow.bind(this));
                     window.$(el).on("hide.daterangepicker", this.onPickerHide.bind(this));
 
+                    this.pickerContainer.addEventListener(
+                        "click",
+                        (ev) => {
+                            ev.isFromDateRangePicker = true;
+                        },
+                        { capture: true }
+                    );
+
                     this.pickerContainer.dataset.name = this.props.name;
                 }
 
@@ -127,6 +135,10 @@ export class DateRangeField extends Component {
         const input = document.querySelector(
             `.o_field_daterange[name='${this.relatedDateRangeField}'] input`
         );
+        if (!input) {
+            // Don't attempt to update the related daterange field if not present in the DOM
+            return;
+        }
         const target = window.$(input).data("daterangepicker");
         target.setStartDate(picker.startDate);
         target.setEndDate(picker.endDate);

@@ -36,6 +36,14 @@ var ActivityController = BasicController.extend({
         this.searchViewId = params.searchViewId;
     },
 
+    /**
+     * @override
+     */
+    async start() {
+        await this._super(...arguments);
+        this.el.classList.toggle("o_action_delegate_scroll", Component.env.isSmall);
+    },
+
     //--------------------------------------------------------------------------
     // Private
     //--------------------------------------------------------------------------
@@ -70,9 +78,12 @@ var ActivityController = BasicController.extend({
                 const messaging = await owl.Component.env.services.messaging.get();
                 const thread = messaging.models['Thread'].insert({ id: resIds[0], model: this.model.modelName });
                 await messaging.openActivityForm({ thread });
-                this.trigger_up('reload');
             },
-        });
+        },
+        {
+            onClose: () => this.trigger_up("reload"),
+        }
+    );
     },
     /**
      * @private

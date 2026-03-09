@@ -1,9 +1,18 @@
 /** @odoo-module */
 
-import { getFixture, click, legacyExtraNextTick, nextTick, editInput } from "@web/../tests/helpers/utils";
+import {
+    getFixture,
+    click,
+    legacyExtraNextTick,
+    nextTick,
+    editInput,
+} from "@web/../tests/helpers/utils";
 import { getDashboardServerData } from "../utils/data";
 import { getBasicData, getBasicListArchs } from "@spreadsheet/../tests/utils/data";
 import { createSpreadsheetDashboard } from "../utils/dashboard_action";
+import { registry } from "@web/core/registry";
+import { errorService } from "@web/core/errors/error_service";
+import { RPCError } from "@web/core/network/rpc_service";
 
 QUnit.module("spreadsheet_dashboard > Dashboard > Dashboard action");
 
@@ -86,6 +95,7 @@ QUnit.test("display no dashboard message", async (assert) => {
 });
 
 QUnit.test("display error message", async (assert) => {
+    registry.category("services").add("error", errorService);
     await createSpreadsheetDashboard({
         mockRPC: function (route, args) {
             if (
@@ -95,7 +105,9 @@ QUnit.test("display error message", async (assert) => {
                     // to pass when `spreadsheet_dashboard_edition` module is installed
                     (args.method === "join_spreadsheet_session" && args.args[0] === 2))
             ) {
-                throw new Error("Bip");
+                const error = new RPCError();
+                error.data = {};
+                throw error;
             }
         },
     });
@@ -111,6 +123,19 @@ QUnit.test("display error message", async (assert) => {
     await click(spreadsheets[0]);
     assert.containsOnce(fixture, ".o-spreadsheet", "It should display the spreadsheet");
     assert.containsNone(fixture, ".o_renderer .error", "It should not display an error");
+});
+
+QUnit.test("load dashboard that doesn't exist", async (assert) => {
+    registry.category("services").add("error", errorService);
+    await createSpreadsheetDashboard({
+        spreadsheetId: 999,
+    });
+    const fixture = getFixture();
+    assert.containsOnce(
+        fixture,
+        ".o_spreadsheet_dashboard_action .dashboard-loading-status.error",
+        "It should display an error"
+    );
 });
 
 QUnit.test(
@@ -181,6 +206,49 @@ QUnit.test(
         await click(fixture.querySelector(".o_cp_top_right .fa-times"));
 
         assert.containsNone(fixture, ".o_cp_top_right .fa-times");
-        assert.equal(year.value, "Select year...");
+        assert.equal(year.value, "");
     }
 );
+
+QUnit.test("Global filter with same id is not shared between dashboards", async function (assert) {
+    const spreadsheetData = {
+        globalFilters: [
+            {
+                id: "1",
+                type: "relation",
+                label: "Relation Filter",
+                modelName: "product",
+            },
+        ],
+    };
+    const serverData = getServerData(spreadsheetData);
+    serverData.models["spreadsheet.dashboard"].records.push({
+        id: 790,
+        name: "Spreadsheet dup. with Pivot",
+        json_data: JSON.stringify(spreadsheetData),
+        raw: JSON.stringify(spreadsheetData),
+        dashboard_group_id: 1,
+    });
+    serverData.models["spreadsheet.dashboard.group"].records[0].dashboard_ids = [789, 790];
+    const fixture = getFixture();
+    await createSpreadsheetDashboard({ serverData });
+    assert.containsNone(
+        fixture,
+        ".o-filter-value .o_tag_badge_text",
+        "It should not display any filter value"
+    );
+    await click(fixture.querySelector(".o-autocomplete--input.o_input"));
+    await click(fixture.querySelector(".dropdown-item"));
+    assert.containsN(
+        fixture,
+        ".o-filter-value .o_tag_badge_text",
+        1,
+        "It should not display any filter value"
+    );
+    await click(fixture.querySelector(".o_search_panel li:last-child"));
+    assert.containsNone(
+        fixture,
+        ".o-filter-value .o_tag_badge_text",
+        "It should not display any filter value"
+    );
+});

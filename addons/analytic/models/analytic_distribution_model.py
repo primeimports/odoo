@@ -74,9 +74,9 @@ class AccountAnalyticDistributionModel(models.Model):
 
     def _get_fields_to_check(self):
         return (
-                set(self.env['account.analytic.distribution.model']._fields)
-                - set(self.env['analytic.mixin']._fields)
-                - set(models.MAGIC_COLUMNS) - {'display_name', '__last_update'}
+            {field.name for field in self._fields.values() if not field.manual}
+            - set(self.env['analytic.mixin']._fields)
+            - set(models.MAGIC_COLUMNS) - {'display_name', '__last_update'}
         )
 
     def _check_score(self, key, value):
@@ -102,3 +102,14 @@ class AccountAnalyticDistributionModel(models.Model):
             return [(fname, 'in', value)]
         else:
             return [(fname, 'in', [value, False])]
+
+    def action_read_distribution_model(self):
+        self.ensure_one()
+        return {
+            'name': self.display_name,
+            'type': 'ir.actions.act_window',
+            'view_type': 'form',
+            'view_mode': 'form',
+            'res_model': 'account.analytic.distribution.model',
+            'res_id': self.id,
+        }

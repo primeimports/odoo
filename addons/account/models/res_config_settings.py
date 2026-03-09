@@ -3,6 +3,8 @@
 
 from odoo import api, fields, models, _
 
+from odoo.addons.account.models.company import PEPPOL_LIST
+
 
 class ResConfigSettings(models.TransientModel):
     _inherit = 'res.config.settings'
@@ -22,7 +24,7 @@ class ResConfigSettings(models.TransientModel):
         string="Gain Account",
         readonly=False,
         domain="[('deprecated', '=', False), ('company_id', '=', company_id),\
-                ('account_type', 'in', ('income', 'income_other'))]")
+                ('internal_group', '=', 'income')]")
     expense_currency_exchange_account_id = fields.Many2one(
         comodel_name="account.account",
         related="company_id.expense_currency_exchange_account_id",
@@ -67,7 +69,11 @@ class ResConfigSettings(models.TransientModel):
              'Bank transactions are then reconciled on the Outstanding Payments Account rather the Payable Account.')
     transfer_account_id = fields.Many2one('account.account', string="Internal Transfer Account",
         related='company_id.transfer_account_id', readonly=False,
-        domain="[('reconcile', '=', True), ('account_type', '=', 'asset_current')]",
+        domain=[
+            ('reconcile', '=', True),
+            ('account_type', '=', 'asset_current'),
+            ('deprecated', '=', False),
+        ],
         help="Intermediary account used when moving from a liquidity account to another.")
     module_account_accountant = fields.Boolean(string='Accounting')
     group_warning_account = fields.Boolean(string="Warnings in Invoices", implied_group='account.group_warning_account')
@@ -176,6 +182,19 @@ class ResConfigSettings(models.TransientModel):
         domain="[('deprecated', '=', False), ('company_id', '=', company_id), ('account_type', 'in', ('income', 'income_other', 'expense'))]",
     )
 
+    # PEPPOL
+    is_account_peppol_eligible = fields.Boolean(
+        string='PEPPOL eligible',
+        compute='_compute_is_account_peppol_eligible',
+    )  # technical field used for showing the Peppol settings conditionally
+
+    @api.depends('country_code')
+    def _compute_is_account_peppol_eligible(self):
+        # we want to show Peppol settings only to customers that are eligible for Peppol,
+        # except countries that are not in Europe
+        for config in self:
+            config.is_account_peppol_eligible = config.country_code in PEPPOL_LIST
+
     def set_values(self):
         super().set_values()
         # install a chart of accounts for the given company (if required)
@@ -195,7 +214,7 @@ class ResConfigSettings(models.TransientModel):
                 'credit_limit',
                 'res.partner',
                 setting.account_default_credit_limit,
-                self.company_id.id
+                setting.company_id.id
             )
 
     @api.depends('company_id')
@@ -243,6 +262,8 @@ class ResConfigSettings(models.TransientModel):
 
     def action_update_terms(self):
         self.ensure_one()
+        if hasattr(self, 'website_id') and self.env.user.has_group('website.group_website_designer'):
+            return self.env["website"].get_client_action('/terms', True)
         return {
             'name': _('Update Terms & Conditions'),
             'type': 'ir.actions.act_window',

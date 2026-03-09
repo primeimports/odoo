@@ -71,7 +71,7 @@
                     <record id="account_tax_report_line_1b_exemptions_deductible_amounts" model="account.report.line">
                         <field name="name">021 - Exemptions and deductible amounts</field>
                         <field name="code">LUTAX_021</field>
-                        <field name="aggregation_formula">LUTAX_014.balance + LUTAX_457.balance + LUTAX_015.balance + LUTAX_016.balance + LUTAX_017.balance + LUTAX_018.balance + LUTAX_423.balance + LUTAX_424.balance + LUTAX_226.balance + LUTAX_019.balance + LUTAX_419.balance</field>
+                        <field name="aggregation_formula">LUTAX_014.balance + LUTAX_457.balance + LUTAX_015.balance + LUTAX_016.balance + LUTAX_017.balance + LUTAX_018.balance + LUTAX_423.balance + LUTAX_424.balance + LUTAX_226.balance + LUTAX_019.balance + LUTAX_419.balance + LUTAX_481.balance + LUTAX_482.balance</field>
                         <field name="children_ids">
                             <record id="account_tax_report_line_1b_1_intra_community_goods_pi_vat" model="account.report.line">
                                 <field name="name">457 - Intra-Community supply of goods to persons identified for VAT purposes in another Member State (MS)</field>
@@ -173,7 +173,7 @@
                                 </field>
                             </record>
                             <record id="account_tax_report_line_1b_6_d_supplies_other_referred" model="account.report.line">
-                                <field name="name">019 - Supplies other than referred to in 018 and 423 or 424</field>
+                                <field name="name">019 - Other supplies carried out (for which the place of supply is) abroad</field>
                                 <field name="code">LUTAX_019</field>
                                 <field name="expression_ids">
                                     <record id="account_tax_report_line_1b_6_d_supplies_other_referred_tag" model="account.report.expression">
@@ -191,6 +191,30 @@
                                         <field name="label">balance</field>
                                         <field name="engine">tax_tags</field>
                                         <field name="formula">419</field>
+                                    </record>
+                                </field>
+                            </record>
+                            <record id="account_tax_report_line_1b_8_supplies_carried_out_domestic" model="account.report.line">
+                                <field name="name">481 - Supplies carried out within the scope of the domestic SME scheme of article 57bis (7)</field>
+                                <field name="code">LUTAX_481</field>
+                                <field name="expression_ids">
+                                    <record id="account_tax_report_line_1b_8_supplies_carried_out_domestic_tag" model="account.report.expression">
+                                        <field name="label">balance</field>
+                                        <field name="engine">external</field>
+                                        <field name="formula">sum</field>
+                                        <field name="subformula">editable</field>
+                                    </record>
+                                </field>
+                            </record>
+                            <record id="account_tax_report_line_1b_9_supplies_carried_out_cross_border" model="account.report.line">
+                                <field name="name">482 - Supplies carried out within the scope of the cross-border SME scheme of article 57 quater</field>
+                                <field name="code">LUTAX_482</field>
+                                <field name="expression_ids">
+                                    <record id="account_tax_report_line_1b_9_supplies_carried_out_cross_border_tag" model="account.report.expression">
+                                        <field name="label">balance</field>
+                                        <field name="engine">external</field>
+                                        <field name="formula">sum</field>
+                                        <field name="subformula">editable</field>
                                     </record>
                                 </field>
                             </record>
@@ -1374,8 +1398,19 @@
                     <record id="account_tax_report_line_2f_supply_goods_base" model="account.report.line">
                         <field name="name">767 - Supply of goods for which the purchaser is liable for the payment of VAT - base</field>
                         <field name="code">LUTAX_767</field>
-                        <field name="aggregation_formula">LUTAX_763.balance + LUTAX_963.balance</field>
+                        <field name="aggregation_formula">LUTAX_769.balance + LUTAX_763.balance + LUTAX_963.balance</field>
                         <field name="children_ids">
+                            <record id="account_tax_report_line_2f_supply_goods_base_17" model="account.report.line">
+                                <field name="name">769 - base 17%</field>
+                                <field name="code">LUTAX_769</field>
+                                <field name="expression_ids">
+                                    <record id="account_tax_report_line_2f_supply_goods_base_17_tag" model="account.report.expression">
+                                        <field name="label">balance</field>
+                                        <field name="engine">tax_tags</field>
+                                        <field name="formula">769</field>
+                                    </record>
+                                </field>
+                            </record>
                             <record id="account_tax_report_line_2f_supply_goods_base_8" model="account.report.line">
                                 <field name="name">763 - base 8%</field>
                                 <field name="code">LUTAX_763</field>
@@ -1403,8 +1438,19 @@
                     <record id="account_tax_report_line_2f_supply_goods_tax" model="account.report.line">
                         <field name="name">768 - Supply of goods for which the purchaser is liable for the payment of VAT - tax</field>
                         <field name="code">LUTAX_768</field>
-                        <field name="aggregation_formula">LUTAX_764.balance + LUTAX_964.balance</field>
+                        <field name="aggregation_formula">LUTAX_770.balance + LUTAX_764.balance + LUTAX_964.balance</field>
                         <field name="children_ids">
+                            <record id="account_tax_report_line_2f_supply_goods_tax_17" model="account.report.line">
+                                <field name="name">770 - tax 17%</field>
+                                <field name="code">LUTAX_770</field>
+                                <field name="expression_ids">
+                                    <record id="account_tax_report_line_2f_supply_goods_tax_17_tag" model="account.report.expression">
+                                        <field name="label">balance</field>
+                                        <field name="engine">tax_tags</field>
+                                        <field name="formula">770</field>
+                                    </record>
+                                </field>
+                            </record>
                             <record id="account_tax_report_line_2f_supply_goods_tax_8" model="account.report.line">
                                 <field name="name">764 - tax 8%</field>
                                 <field name="code">LUTAX_764</field>
@@ -1577,7 +1623,7 @@
                     <record id="account_tax_report_line_3c_total_input_tax_deductible" model="account.report.line">
                         <field name="name">102 - Total input tax deductible</field>
                         <field name="code">LUTAX_102</field>
-                        <field name="aggregation_formula">LUTAX_458.balance+LUTAX_459.balance+LUTAX_460.balance+LUTAX_090.balance+LUTAX_461.balance+LUTAX_092.balance+LUTAX_228.balance+LUTAX_094.balance+LUTAX_095.balance</field>
+                        <field name="aggregation_formula">LUTAX_093.balance - LUTAX_097.balance</field>
                     </record>
                 </field>
             </record>
@@ -1587,7 +1633,7 @@
                     <record id="account_tax_report_line_4a_total_tax_due" model="account.report.line">
                         <field name="name">103 - Total tax due</field>
                         <field name="code">LUTAX_103</field>
-                        <field name="aggregation_formula">LUTAX_702.balance+LUTAX_704.balance+LUTAX_706.balance+LUTAX_040.balance+LUTAX_712.balance+LUTAX_714.balance+LUTAX_716.balance+LUTAX_054.balance+LUTAX_722.balance+LUTAX_724.balance+LUTAX_726.balance+LUTAX_068.balance+LUTAX_732.balance+LUTAX_734.balance+LUTAX_736.balance+LUTAX_073.balance+LUTAX_742.balance+LUTAX_744.balance+LUTAX_746.balance+LUTAX_432.balance+LUTAX_752.balance+LUTAX_754.balance+LUTAX_756.balance+LUTAX_442.balance+LUTAX_762.balance+LUTAX_764.balance+LUTAX_227.balance</field>
+                        <field name="aggregation_formula">LUTAX_046.balance + LUTAX_056.balance + LUTAX_407.balance + LUTAX_410.balance + LUTAX_768.balance + LUTAX_227.balance</field>
                     </record>
                     <record id="account_tax_report_line_4a_total_input_tax_deductible" model="account.report.line">
                         <field name="name">104 - Total input tax deductible</field>

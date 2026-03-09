@@ -5,6 +5,7 @@ import { registry } from "@web/core/registry";
 import { editView } from "@web/views/debug_items";
 import { clearUncommittedChanges } from "@web/webclient/actions/action_service";
 import { listView } from "@web/views/list/list_view";
+import { FormViewDialog } from "@web/views/view_dialogs/form_view_dialog";
 import { useSetupAction } from "@web/webclient/actions/action_hook";
 import testUtils from "web.test_utils";
 import { session } from "@web/session";
@@ -19,6 +20,7 @@ import {
     patchWithCleanup,
     clickSave,
 } from "../../helpers/utils";
+import { contains } from "@web/../tests/utils";
 import { createWebClient, doAction, getActionManagerServerData, loadState } from "./../helpers";
 import { errorService } from "../../../src/core/errors/error_service";
 import { RPCError } from "@web/core/network/rpc_service";
@@ -615,6 +617,7 @@ QUnit.module("ActionManager", (hooks) => {
             action: 3,
             view_type: "form",
         });
+        await testUtils.nextTick();
         await legacyExtraNextTick();
 
         // Go back to the list view
@@ -623,7 +626,7 @@ QUnit.module("ActionManager", (hooks) => {
             action: 3,
             view_type: "list",
         });
-        await legacyExtraNextTick();
+        await testUtils.nextTick();
         await legacyExtraNextTick();
         assert.containsOnce(target, ".o_list_view", "should still display the list view");
 
@@ -2194,11 +2197,7 @@ QUnit.module("ActionManager", (hooks) => {
             await doAction(webClient, 3);
 
             await click(target.querySelector(".o_list_button_add"));
-            assert.containsOnce(
-                document.body,
-                ".modal.o_technical_modal",
-                "Warning modal should be opened"
-            );
+            await contains(".modal.o_technical_modal");
 
             await click(document.querySelector(".modal.o_technical_modal button.btn-close"));
             assert.containsNone(
@@ -2501,12 +2500,11 @@ QUnit.module("ActionManager", (hooks) => {
         assert.containsOnce(target, ".o_list_view");
         assert.containsOnce(target, ".o_view_nocontent");
         assert.strictEqual(target.querySelector(".o_view_nocontent").innerText, "Hello");
-        assert.containsNone(target, "table");
+        assert.containsOnce(target, "table");
 
         await doAction(webClient, 4);
         assert.containsOnce(target, ".o_list_view");
         assert.containsNone(target, ".o_view_nocontent");
-        assert.containsOnce(target, "table");
     });
 
     QUnit.test("process context.form_view_initial_mode", async function (assert) {
@@ -2636,5 +2634,94 @@ QUnit.module("ActionManager", (hooks) => {
         await cpHelpers.switchView(target, "pivot");
 
         assert.containsOnce(target, ".o_pivot_view .o_view_sample_data");
+    });
+
+    QUnit.test("click on breadcrumb of a deleted record", async function (assert) {
+        serviceRegistry.add("error", errorService);
+        // In tests we catch unhandledrejection of promises rejected with something that isn't an
+        // error (see tests/qunit.js). In this scenario, with the legacy basic_model, the promise
+        // is rejected with undefined, so without the following lines, we can't reproduce the issue,
+        // which was that the error handlers were executed in a wrong order, and one of them crashed.
+        const windowUnhandledReject = window.onunhandledrejection;
+        window.onunhandledrejection = null;
+        registerCleanup(() => {
+            window.onunhandledrejection = windowUnhandledReject;
+        });
+
+        const handler = (ev) => {
+            // need to preventDefault to remove error from console (so python test pass)
+            ev.preventDefault();
+        };
+        window.addEventListener("unhandledrejection", handler);
+        registerCleanup(() => window.removeEventListener("unhandledrejection", handler));
+        patchWithCleanup(QUnit, {
+            onUnhandledRejection: () => {},
+        });
+
+        serverData.views["partner,false,form"] = `
+            <form>
+                <button type="action" name="3" string="Open Action 3" class="my_btn"/>
+            </form>`;
+
+        const webClient = await createWebClient({ serverData });
+        await doAction(webClient, 3);
+        assert.containsOnce(target, ".o_list_view");
+
+        await click(target.querySelector(".o_data_row .o_data_cell"));
+        assert.containsOnce(target, ".o_form_view");
+
+        await click(target.querySelector(".my_btn"));
+        assert.containsOnce(target, ".o_list_view");
+
+        await click(target.querySelector(".o_data_row .o_data_cell"));
+        assert.containsOnce(target, ".o_form_view");
+        assert.deepEqual(getNodesTextContent(target.querySelectorAll(".breadcrumb-item")), [
+            "Partners",
+            "First record",
+            "Partners",
+            "First record",
+        ]);
+
+        // open action menu and delete
+        await cpHelpers.toggleActionMenu(target);
+        await cpHelpers.toggleMenuItem(target, "Delete");
+        assert.containsOnce(target, ".o_dialog");
+
+        // confirm
+        await click(target.querySelector(".o_dialog .modal-footer .btn-primary"));
+        assert.containsOnce(target, ".o_form_view");
+        assert.deepEqual(getNodesTextContent(target.querySelectorAll(".breadcrumb-item")), [
+            "Partners",
+            "First record",
+            "Partners",
+            "Second record",
+        ]);
+
+        // click on "First record" in breadcrumbs, which doesn't exist anymore
+        await click(target.querySelectorAll(".breadcrumb-item a")[1]);
+        await nextTick();
+        assert.containsOnce(target, ".o_form_view");
+        assert.deepEqual(getNodesTextContent(target.querySelectorAll(".breadcrumb-item")), [
+            "Partners",
+            "Partners",
+            "Partners",
+            "Second record",
+        ]);
+    });
+
+    QUnit.test("executing an action closes dialogs", async function (assert) {
+        const webClient = await createWebClient({ serverData });
+        await doAction(webClient, 3);
+        assert.containsOnce(target, ".o_list_view");
+
+        webClient.env.services.dialog.add(FormViewDialog, { resModel: "partner", resId: 1 });
+        await nextTick();
+        assert.containsOnce(target, ".o_dialog .o_form_view");
+
+        await click(
+            target.querySelector(".o_dialog .o_form_view .o_statusbar_buttons button[name='4']")
+        );
+        assert.containsOnce(target, ".o_kanban_view");
+        assert.containsNone(target, ".o_dialog");
     });
 });

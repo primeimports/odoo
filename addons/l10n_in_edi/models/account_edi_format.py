@@ -29,13 +29,41 @@ class AccountEdiFormat(models.Model):
             return journal.company_id.country_id.code == 'IN'
         return super()._is_enabled_by_default_on_journal(journal)
 
+    def _get_l10n_in_base_tags(self):
+        return (
+           self.env.ref('l10n_in.tax_tag_base_sgst').ids
+           + self.env.ref('l10n_in.tax_tag_base_cgst').ids
+           + self.env.ref('l10n_in.tax_tag_base_igst').ids
+           + self.env.ref('l10n_in.tax_tag_base_cess').ids
+           + self.env.ref('l10n_in.tax_tag_zero_rated').ids
+           + self.env.ref("l10n_in.tax_tag_exempt").ids
+           + self.env.ref("l10n_in.tax_tag_nil_rated").ids
+           + self.env.ref("l10n_in.tax_tag_non_gst_supplies").ids
+        )
+
+    def _get_l10n_in_gst_tags(self):
+        return (
+           self.env.ref('l10n_in.tax_tag_base_sgst')
+           + self.env.ref('l10n_in.tax_tag_base_cgst')
+           + self.env.ref('l10n_in.tax_tag_base_igst')
+           + self.env.ref('l10n_in.tax_tag_base_cess')
+           + self.env.ref('l10n_in.tax_tag_zero_rated')
+        ).ids
+
+    def _get_l10n_in_non_taxable_tags(self):
+        return (
+           self.env.ref("l10n_in.tax_tag_exempt")
+           + self.env.ref("l10n_in.tax_tag_nil_rated")
+           + self.env.ref("l10n_in.tax_tag_non_gst_supplies")
+        ).ids
+
     def _get_move_applicability(self, move):
         # EXTENDS account_edi
         self.ensure_one()
         if self.code != 'in_einvoice_1_03':
             return super()._get_move_applicability(move)
-
-        if move.is_sale_document() and move.country_code == 'IN' and move.l10n_in_gst_treatment in (
+        is_under_gst = any(move_line_tag.id in self._get_l10n_in_gst_tags() for move_line_tag in move.line_ids.tax_tag_ids)
+        if move.is_sale_document(include_receipts=True) and move.country_code == 'IN' and is_under_gst and move.l10n_in_gst_treatment in (
             "regular",
             "composition",
             "overseas",
@@ -70,12 +98,18 @@ class AccountEdiFormat(models.Model):
         error_message += self._l10n_in_validate_partner(move.company_id.partner_id, is_company=True)
         if not re.match("^.{1,16}$", move.name):
             error_message.append(_("Invoice number should not be more than 16 characters"))
+        all_base_tags = self._get_l10n_in_gst_tags() + self._get_l10n_in_non_taxable_tags()
         for line in move.invoice_line_ids.filtered(lambda line: line.display_type not in ('line_note', 'line_section', 'rounding')):
             if line.price_subtotal < 0:
                 # Line having a negative amount is not allowed.
                 if not move._l10n_in_edi_is_managing_invoice_negative_lines_allowed():
                     raise ValidationError(_("Invoice lines having a negative amount are not allowed to generate the IRN. "
                                   "Please create a credit note instead."))
+            if line.display_type == 'product' and line.discount < 0:
+                error_message.append(_("Negative discount is not allowed, set in line %s", line.name))
+            if not line.tax_tag_ids or not any(move_line_tag.id in all_base_tags for move_line_tag in line.tax_tag_ids):
+                error_message.append(_(
+                    """Set an appropriate GST tax on line "%s" (if it's zero rated or nil rated then select it also)""", line.product_id.name))
             if line.product_id:
                 hsn_code = self._l10n_in_edi_extract_digits(line.product_id.l10n_in_hsn_code)
                 if not hsn_code:
@@ -89,8 +123,7 @@ class AccountEdiFormat(models.Model):
         return error_message
 
     def _l10n_in_edi_get_iap_buy_credits_message(self, company):
-        base_url = "https://iap-sandbox.odoo.com/iap/1/credit" if not company.sudo().l10n_in_edi_production_env else ""
-        url = self.env["iap.account"].get_credits_url(service_name="l10n_in_edi", base_url=base_url)
+        url = self.env["iap.account"].get_credits_url(service_name="l10n_in_edi")
         return markupsafe.Markup("""<p><b>%s</b></p><p>%s <a href="%s">%s</a></p>""") % (
             _("You have insufficient credits to send this document!"),
             _("Please buy more credits and retry: "),
@@ -142,7 +175,7 @@ class AccountEdiFormat(models.Model):
                 return {invoice: {
                     "success": False,
                     "error": error_message,
-                    "blocking_level": ("404" in error_codes) and "warning" or "error",
+                    "blocking_level": "warning" if {'404', 'timeout'} & set(error_codes) else "error",
                 }}
         if not response.get("error"):
             json_dump = json.dumps(response.get("data"))
@@ -179,6 +212,7 @@ class AccountEdiFormat(models.Model):
                         error_codes = [e.get("code") for e in error]
             if "9999" in error_codes:
                 response = {}
+                error = []
                 odoobot = self.env.ref("base.partner_root")
                 invoice.message_post(author_id=odoobot.id, body=_(
                     "Somehow this invoice had been cancelled to government before." \
@@ -192,7 +226,7 @@ class AccountEdiFormat(models.Model):
                     "error": self._l10n_in_edi_get_iap_buy_credits_message(invoice.company_id),
                     "blocking_level": "error",
                 }}
-            else:
+            if error:
                 error_message = "<br/>".join(["[%s] %s" % (e.get("code"), html_escape(e.get("message"))) for e in error])
                 return {invoice: {
                     "success": False,
@@ -202,37 +236,46 @@ class AccountEdiFormat(models.Model):
         if not response.get("error"):
             json_dump = json.dumps(response.get("data", {}))
             json_name = "%s_cancel_einvoice.json" % (invoice.name.replace("/", "_"))
-            attachment = self.env["ir.attachment"].create({
-                "name": json_name,
-                "raw": json_dump.encode(),
-                "res_model": "account.move",
-                "res_id": invoice.id,
-                "mimetype": "application/json",
-            })
+            attachment = False
+            if json_dump:
+                attachment = self.env["ir.attachment"].create({
+                    "name": json_name,
+                    "raw": json_dump.encode(),
+                    "res_model": "account.move",
+                    "res_id": invoice.id,
+                    "mimetype": "application/json",
+                })
             return {invoice: {"success": True, "attachment": attachment}}
 
     def _l10n_in_validate_partner(self, partner, is_company=False):
         self.ensure_one()
         message = []
         if not re.match("^.{3,100}$", partner.street or ""):
-            message.append(_("\n- Street required min 3 and max 100 characters"))
+            message.append(_("- Street required min 3 and max 100 characters"))
         if partner.street2 and not re.match("^.{3,100}$", partner.street2):
-            message.append(_("\n- Street2 should be min 3 and max 100 characters"))
+            message.append(_("- Street2 should be min 3 and max 100 characters"))
         if not re.match("^.{3,100}$", partner.city or ""):
-            message.append(_("\n- City required min 3 and max 100 characters"))
-        if not re.match("^.{3,50}$", partner.state_id.name or ""):
-            message.append(_("\n- State required min 3 and max 50 characters"))
+            message.append(_("- City required min 3 and max 100 characters"))
+        if partner.country_id.code == "IN" and not re.match("^.{3,50}$", partner.state_id.name or ""):
+            message.append(_("- State required min 3 and max 50 characters"))
+        if (
+            partner.country_id.code == "IN"
+            and not re.match(r"^(?!0+$)([0-9]{2})$", partner.state_id.l10n_in_tin or "")
+        ):
+            message.append(_("- State TIN Number must be exactly 2 digits."))
         if partner.country_id.code == "IN" and not re.match("^[0-9]{6,}$", partner.zip or ""):
-            message.append(_("\n- Zip code required 6 digits"))
+            message.append(_("- Zip code required 6 digits"))
         if partner.phone and not re.match("^[0-9]{10,12}$",
             self._l10n_in_edi_extract_digits(partner.phone)
         ):
-            message.append(_("\n- Mobile number should be minimum 10 or maximum 12 digits"))
+            message.append(_("- Mobile number should be minimum 10 or maximum 12 digits"))
         if partner.email and (
             not re.match(r"^[a-zA-Z0-9+_.-]+@[a-zA-Z0-9.-]+$", partner.email)
             or not re.match("^.{6,100}$", partner.email)
         ):
-            message.append(_("\n- Email address should be valid and not more then 100 characters"))
+            message.append(_("- Email address should be valid and not more then 100 characters"))
+        if message:
+            message.insert(0, "%s" %(partner.display_name))
         return message
 
     def _get_l10n_in_edi_saler_buyer_party(self, move):
@@ -254,10 +297,11 @@ class AccountEdiFormat(models.Model):
             if is_overseas is true then pin is 999999 and GSTIN(vat) is URP and Stcd is .
             if pos_state_id is passed then we use set POS
         """
+        zip_digits = self._l10n_in_edi_extract_digits(partner.zip)
         partner_details = {
             "Addr1": partner.street or "",
             "Loc": partner.city or "",
-            "Pin": int(self._l10n_in_edi_extract_digits(partner.zip)),
+            "Pin": zip_digits and int(zip_digits) or "",
             "Stcd": partner.state_id.l10n_in_tin or "",
         }
         if partner.street2:
@@ -272,10 +316,10 @@ class AccountEdiFormat(models.Model):
         if set_vat:
             partner_details.update({
                 "LglNm": partner.commercial_partner_id.name,
-                "GSTIN": partner.vat or "",
+                "GSTIN": partner.vat or "URP",
             })
         else:
-            partner_details.update({"Nm": partner.name})
+            partner_details.update({"Nm": partner.name or partner.commercial_partner_id.name})
         # For no country I would suppose it is India, so not sure this is super right
         if is_overseas and (not partner.country_id or partner.country_id.code != 'IN'):
             partner_details.update({
@@ -451,13 +495,15 @@ class AccountEdiFormat(models.Model):
         is_overseas = invoice.l10n_in_gst_treatment == "overseas"
         lines = invoice.invoice_line_ids.filtered(lambda line: line.display_type not in ('line_note', 'line_section', 'rounding'))
         tax_details_per_record = tax_details.get("tax_details_per_record")
+        sign = invoice.is_inbound() and -1 or 1
+        rounding_amount = sum(line.balance for line in invoice.line_ids if line.display_type == 'rounding') * sign
         json_payload = {
             "Version": "1.1",
             "TranDtls": {
                 "TaxSch": "GST",
                 "SupTyp": self._l10n_in_get_supply_type(invoice, tax_details_by_code),
                 "RegRev": tax_details_by_code.get("is_reverse_charge") and "Y" or "N",
-                "IgstOnIntra": is_intra_state and tax_details_by_code.get("igst") and "Y" or "N"},
+                "IgstOnIntra": is_intra_state and tax_details_by_code.get("igst_amount") and "Y" or "N"},
             "DocDtls": {
                 "Typ": invoice.move_type == "out_refund" and "CRN" or "INV",
                 "No": invoice.name,
@@ -483,9 +529,9 @@ class AccountEdiFormat(models.Model):
                     + tax_details_by_code.get("state_cess_non_advol_amount", 0.00)),
                 ),
                 "RndOffAmt": self._l10n_in_round_value(
-                    sum(line.balance for line in invoice.invoice_line_ids if line.display_type == 'rounding')),
+                    rounding_amount),
                 "TotInvVal": self._l10n_in_round_value(
-                    (tax_details.get("base_amount") + tax_details.get("tax_amount"))),
+                    (tax_details.get("base_amount") + tax_details.get("tax_amount") + rounding_amount)),
             },
         }
         if invoice.company_currency_id != invoice.currency_id:
@@ -505,7 +551,7 @@ class AccountEdiFormat(models.Model):
         if is_overseas:
             json_payload.update({
                 "ExpDtls": {
-                    "RefClm": tax_details_by_code.get("igst") and "Y" or "N",
+                    "RefClm": tax_details_by_code.get("igst_amount") and "Y" or "N",
                     "ForCur": invoice.currency_id.name,
                     "CntCode": saler_buyer.get("buyer_details").country_id.code or "",
                 }
@@ -598,8 +644,7 @@ class AccountEdiFormat(models.Model):
         return {'error': [{
             'code': '0',
             'message': _(
-                "Unable to send e-Invoice."
-                "Create an API user in NIC portal, and set it using the top menu: Configuration > Settings."
+                "Ensure GST Number set on company setting and API are Verified."
             )}
         ]}
 
@@ -616,17 +661,21 @@ class AccountEdiFormat(models.Model):
     @api.model
     def _l10n_in_edi_connect_to_server(self, company, url_path, params):
         user_token = self.env["iap.account"].get("l10n_in_edi")
+        IrConfigParam = self.env["ir.config_parameter"].sudo()
         params.update({
             "account_token": user_token.account_token,
-            "dbuuid": self.env["ir.config_parameter"].sudo().get_param("database.uuid"),
+            "dbuuid": IrConfigParam.get_param("database.uuid"),
             "username": company.sudo().l10n_in_edi_username,
             "gstin": company.vat,
         })
+        gsp_provider = IrConfigParam.get_param("l10n_in.gsp_provider")
+        if gsp_provider:
+            params.update({"gsp_provider": gsp_provider})
         if company.sudo().l10n_in_edi_production_env:
             default_endpoint = DEFAULT_IAP_ENDPOINT
         else:
             default_endpoint = DEFAULT_IAP_TEST_ENDPOINT
-        endpoint = self.env["ir.config_parameter"].sudo().get_param("l10n_in_edi.endpoint", default_endpoint)
+        endpoint = IrConfigParam.get_param("l10n_in_edi.endpoint", default_endpoint)
         url = "%s%s" % (endpoint, url_path)
         try:
             return jsonrpc(url, params=params, timeout=25)

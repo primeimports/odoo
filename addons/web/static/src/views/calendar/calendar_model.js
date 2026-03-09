@@ -24,7 +24,7 @@ export class CalendarModel extends Model {
         const formViewIdFromConfig = formViewFromConfig ? formViewFromConfig[0] : false;
         this.meta = {
             ...params,
-            firstDayOfWeek: localization.weekStart,
+            firstDayOfWeek: (localization.weekStart || 0) % 7,
             formViewId: params.formViewId || formViewIdFromConfig,
         };
 
@@ -345,8 +345,8 @@ export class CalendarModel extends Model {
         }
 
         if (["week", "month"].includes(scale)) {
-            const weekday = start.weekday < firstDayOfWeek ? firstDayOfWeek - 7 : firstDayOfWeek;
-            start = start.set({ weekday });
+            const currentWeekOffset = (start.weekday - firstDayOfWeek + 7) % 7;
+            start = start.minus({ days: currentWeekOffset });
             end = start.plus({ weeks: scale === "week" ? 1 : 6, days: -1 });
         }
 
@@ -442,7 +442,11 @@ export class CalendarModel extends Model {
         return this.orm.call(this.meta.resModel, "get_unusual_days", [
             serializeDateTime(data.range.start),
             serializeDateTime(data.range.end),
-        ]);
+        ],{
+            context: {
+                'employee_id': this.employeeId,
+            }
+        });
     }
     /**
      * @protected
@@ -482,27 +486,24 @@ export class CalendarModel extends Model {
         const { fields, fieldMapping, isTimeHidden, scale } = this.meta;
 
         const startType = fields[fieldMapping.date_start].type;
-        let start =
-            startType === "date"
-                ? deserializeDate(rawRecord[fieldMapping.date_start])
-                : deserializeDateTime(rawRecord[fieldMapping.date_start]);
+        const isAllDay =
+            startType === "date" ||
+            (fieldMapping.all_day && rawRecord[fieldMapping.all_day]) ||
+            false;
+        let start = isAllDay
+            ? deserializeDate(rawRecord[fieldMapping.date_start])
+            : deserializeDateTime(rawRecord[fieldMapping.date_start]);
 
         let end = start;
         let endType = startType;
         if (fieldMapping.date_stop) {
             endType = fields[fieldMapping.date_stop].type;
-            end =
-                endType === "date"
-                    ? deserializeDate(rawRecord[fieldMapping.date_stop])
-                    : deserializeDateTime(rawRecord[fieldMapping.date_stop]);
+            end = isAllDay
+                ? deserializeDate(rawRecord[fieldMapping.date_stop])
+                : deserializeDateTime(rawRecord[fieldMapping.date_stop]);
         }
 
         const duration = rawRecord[fieldMapping.date_delay] || 1;
-
-        const isAllDay =
-            startType === "date" ||
-            (fieldMapping.all_day && rawRecord[fieldMapping.all_day]) ||
-            false;
 
         if (isAllDay) {
             start = start.startOf("day");
@@ -514,7 +515,7 @@ export class CalendarModel extends Model {
 
         const showTime =
             !(fieldMapping.all_day && rawRecord[fieldMapping.all_day]) &&
-            scale === "month" &&
+            scale !== "year" &&
             startType !== "date" &&
             start.day === end.day;
 
@@ -658,7 +659,8 @@ export class CalendarModel extends Model {
         const { colorFieldName } = filterInfo;
         const shouldFetchColor =
             colorFieldName &&
-            `${fieldName}.${colorFieldName}` !== fields[fieldMapping.color].related;
+            (!fieldMapping.color ||
+                `${fieldName}.${colorFieldName}` !== fields[fieldMapping.color].related);
         let rawColors = [];
         if (shouldFetchColor) {
             const relatedIds = rawFilters.map(({ id }) => id);
@@ -731,7 +733,7 @@ export class CalendarModel extends Model {
             type: "dynamic",
             recordId: null,
             value,
-            label: formatter(rawValue) || _t("Undefined"),
+            label: formatter(rawValue, { field }) || _t("Undefined"),
             active: previousFilter ? previousFilter.active : true,
             canRemove: false,
             colorIndex,

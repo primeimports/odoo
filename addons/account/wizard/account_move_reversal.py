@@ -96,15 +96,16 @@ class AccountMoveReversal(models.TransientModel):
 
     def _prepare_default_reversal(self, move):
         reverse_date = self.date if self.date_mode == 'custom' else move.date
+        mixed_payment_term = move.invoice_payment_term_id.id if move.invoice_payment_term_id and move.company_id.early_pay_discount_computation == 'mixed' else None
         return {
             'ref': _('Reversal of: %(move_name)s, %(reason)s', move_name=move.name, reason=self.reason)
                    if self.reason
                    else _('Reversal of: %s', move.name),
             'date': reverse_date,
             'invoice_date_due': reverse_date,
-            'invoice_date': move.is_invoice(include_receipts=True) and (self.date or move.date) or False,
+            'invoice_date': move.is_invoice(include_receipts=True) and reverse_date or False,
             'journal_id': self.journal_id.id,
-            'invoice_payment_term_id': None,
+            'invoice_payment_term_id': mixed_payment_term,
             'invoice_user_id': move.invoice_user_id.id,
             'auto_post': 'at_date' if reverse_date > fields.Date.context_today(self) else 'no',
         }
@@ -116,7 +117,10 @@ class AccountMoveReversal(models.TransientModel):
         # Create default values.
         default_values_list = []
         for move in moves:
-            default_values_list.append(self._prepare_default_reversal(move))
+            default_values_list.append({
+                'partner_bank_id': False,  # Resets the partner_bank_id as we'll force its recomputation
+                **self._prepare_default_reversal(move),
+            })
 
         batches = [
             [self.env['account.move'], [], True],   # Moves to be cancelled by the reverses.
@@ -133,12 +137,14 @@ class AccountMoveReversal(models.TransientModel):
         moves_to_redirect = self.env['account.move']
         for moves, default_values_list, is_cancel_needed in batches:
             new_moves = moves._reverse_moves(default_values_list, cancel=is_cancel_needed)
+            new_moves._compute_partner_bank_id()
 
             if self.refund_method == 'modify':
                 moves_vals_list = []
                 for move in moves.with_context(include_business_fields=True):
                     moves_vals_list.append(move.copy_data({'date': self.date if self.date_mode == 'custom' else move.date})[0])
                 new_moves = self.env['account.move'].create(moves_vals_list)
+                new_moves._compute_partner_bank_id()
 
             moves_to_redirect |= new_moves
 

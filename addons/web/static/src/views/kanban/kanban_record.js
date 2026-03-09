@@ -14,7 +14,7 @@ import { fileTypeMagicWordMap, imageCacheKey } from "@web/views/fields/image/ima
 import { ViewButton } from "@web/views/view_button/view_button";
 import { useViewCompiler } from "@web/views/view_compiler";
 import { Widget } from "@web/views/widgets/widget";
-import { evalDomain } from "../utils";
+import { evalDomain, getFormattedValue } from "../utils";
 import { KANBAN_BOX_ATTRIBUTE, KANBAN_TOOLTIP_ATTRIBUTE } from "./kanban_arch_parser";
 import { KanbanCompiler } from "./kanban_compiler";
 import { KanbanCoverImageDialog } from "./kanban_cover_image_dialog";
@@ -26,7 +26,9 @@ const { COLORS } = ColorList;
 const formatters = registry.category("formatters");
 
 // These classes determine whether a click on a record should open it.
-export const CANCEL_GLOBAL_CLICK = ["a", ".dropdown", ".oe_kanban_action"].join(",");
+export const CANCEL_GLOBAL_CLICK = ["a", ".dropdown", ".oe_kanban_action", "[data-bs-toggle]"].join(
+    ","
+);
 const ALLOW_GLOBAL_CLICK = [".oe_kanban_global_click", ".oe_kanban_global_click_edit"].join(",");
 
 /**
@@ -150,8 +152,9 @@ function isBinSize(value) {
  * @returns {boolean} true if no content found or if containing only formatting tags
  */
 function isHtmlEmpty(innerHTML = "") {
-    const div = Object.assign(document.createElement("div"), { innerHTML });
-    return div.innerText.trim() === "";
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(innerHTML, "text/html");
+    return doc.body.innerText.trim() === "";
 }
 
 export class KanbanRecord extends Component {
@@ -181,6 +184,12 @@ export class KanbanRecord extends Component {
             this.allowGlobalClick = !!this.rootRef.el.querySelector(ALLOW_GLOBAL_CLICK);
         });
         onWillUpdateProps(this.createRecordAndWidget);
+    }
+
+    getFormattedValue(fieldName) {
+        const { archInfo, record } = this.props;
+        const { rawAttrs } = archInfo.activeFields[fieldName];
+        return getFormattedValue(record, fieldName, rawAttrs);
     }
 
     /**

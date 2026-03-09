@@ -25,6 +25,7 @@ export class KanbanController extends Component {
             resModel,
             handleField: archInfo.handleField,
             limit: archInfo.limit || limit,
+            countLimit: archInfo.countLimit,
             onCreate: archInfo.onCreate,
             quickCreateView: archInfo.quickCreateView,
             defaultGroupBy,
@@ -56,7 +57,7 @@ export class KanbanController extends Component {
         usePager(() => {
             const root = this.model.root;
             const { count, hasLimitedCount, isGrouped, limit, offset } = root;
-            if (!isGrouped) {
+            if (!isGrouped && !this.model.useSampleModel) {
                 return {
                     offset: offset,
                     limit: limit,
@@ -98,6 +99,7 @@ export class KanbanController extends Component {
                 additionalContext: root.context,
                 onClose: async () => {
                     await this.model.root.load();
+                    this.model.useSampleModel = false;
                     this.render(true); // FIXME WOWL reactivity
                 },
             };
@@ -113,7 +115,13 @@ export class KanbanController extends Component {
         if (!create) {
             return false;
         }
-        return list.isGrouped ? list.groups.length > 0 || !createGroup : true;
+        if (list.isGrouped) {
+            if (list.groupByField.type !== "many2one") {
+                return true;
+            }
+            return list.groups.length || !createGroup;
+        }
+        return true;
     }
 
     async beforeExecuteActionButton(clickParams) {}

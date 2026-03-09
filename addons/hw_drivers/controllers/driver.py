@@ -30,6 +30,15 @@ class DriverController(http.Controller):
         if iot_device:
             iot_device.data['owner'] = session_id
             data = json.loads(data)
+
+            # Skip the request if it was already executed (duplicated action calls)
+            iot_idempotent_id = data.get("iot_idempotent_id")
+            if iot_idempotent_id:
+                idempotent_session = iot_device._check_idempotency(iot_idempotent_id, session_id)
+                if idempotent_session:
+                    _logger.info("Ignored request from %s as iot_idempotent_id %s already received from session %s",
+                                 session_id, iot_idempotent_id, idempotent_session)
+                    return False
             iot_device.action(data)
             return True
         return False
@@ -38,9 +47,9 @@ class DriverController(http.Controller):
     def check_certificate(self):
         """
         This route is called when we want to check if certificate is up-to-date
-        Used in cron.daily
+        Used in iot-box cron.daily, deprecated since image 24_08 but needed for compatibility with the image 24_01
         """
-        helpers.check_certificate()
+        helpers.get_certificate_status()
 
     @http.route('/hw_drivers/event', type='json', auth='none', cors='*', csrf=False, save_session=False)
     def event(self, listener):

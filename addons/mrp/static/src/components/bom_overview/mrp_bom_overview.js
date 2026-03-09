@@ -10,6 +10,7 @@ const { Component, EventBus, onWillStart, useSubEnv, useState } = owl;
 export class BomOverviewComponent extends Component {
     setup() {
         this.orm = useService("orm");
+        this.context = this.props.action.context;
         this.actionService = useService("action");
 
         this.variants = [];
@@ -31,6 +32,7 @@ export class BomOverviewComponent extends Component {
             currentWarehouse: null,
             currentVariantId: null,
             bomData: {},
+            precision: 2,
             bomQuantity: null,
         });
 
@@ -56,6 +58,7 @@ export class BomOverviewComponent extends Component {
         if (this.showVariants) {
             this.state.currentVariantId = Object.keys(this.variants)[0];
         }
+        this.state.precision = bomData["precision"];
     }
 
     async getBomData() {
@@ -64,7 +67,10 @@ export class BomOverviewComponent extends Component {
             this.state.bomQuantity,
             this.state.currentVariantId,
         ];
-        const context = this.state.currentWarehouse ? { warehouse: this.state.currentWarehouse.id } : {};
+        const context = { ...this.context};
+        if (this.state.currentWarehouse) {
+            context.warehouse = this.state.currentWarehouse.id;
+        }
         const bomData = await this.orm.call(
             "report.mrp.report_bom_structure",
             "get_html",

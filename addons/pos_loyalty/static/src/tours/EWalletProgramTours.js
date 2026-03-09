@@ -1,5 +1,6 @@
 /** @odoo-module **/
 
+import { ErrorPopup } from 'point_of_sale.tour.ErrorPopupTourMethods';
 import { PosLoyalty } from 'pos_loyalty.tour.PosCouponTourMethods';
 import { ProductScreen } from 'point_of_sale.tour.ProductScreenTourMethods';
 import { TicketScreen } from 'point_of_sale.tour.TicketScreenTourMethods';
@@ -22,14 +23,14 @@ ProductScreen.do.clickPayButton(false);
 Chrome.do.confirmPopup();
 PartnerListScreen.check.isShown();
 PartnerListScreen.do.clickPartner('AAAAAAA');
-PosLoyalty.exec.finalizeOrder('Cash', '50');
+PosLoyalty.exec.finalizeOrder('Cash');
 
 // Topup 10$ for partner_bbb
 ProductScreen.do.clickPartnerButton();
 ProductScreen.do.clickCustomer('BBBBBBB');
 ProductScreen.exec.addOrderline('Top-up eWallet', '1', '10');
 PosLoyalty.check.orderTotalIs('10.00');
-PosLoyalty.exec.finalizeOrder('Cash', '10');
+PosLoyalty.exec.finalizeOrder('Cash');
 
 Tour.register('EWalletProgramTour1', { test: true, url: '/pos/web' }, getSteps());
 
@@ -48,7 +49,7 @@ ProductScreen.do.clickCustomer('AAAAAAA');
 PosLoyalty.check.eWalletButtonState({ highlighted: true, text: getEWalletText('Pay') });
 PosLoyalty.do.clickEWalletButton(getEWalletText('Pay'));
 PosLoyalty.check.orderTotalIs('0.00');
-PosLoyalty.exec.finalizeOrder('Cash', '0');
+PosLoyalty.exec.finalizeOrder('Cash');
 
 // Consume partner_bbb's full eWallet.
 ProductScreen.do.clickPartnerButton();
@@ -58,7 +59,7 @@ ProductScreen.exec.addOrderline('Desk Pad', '6', '6', '36.00');
 PosLoyalty.check.eWalletButtonState({ highlighted: true, text: getEWalletText('Pay') });
 PosLoyalty.do.clickEWalletButton(getEWalletText('Pay'));
 PosLoyalty.check.orderTotalIs('26.00');
-PosLoyalty.exec.finalizeOrder('Cash', '26');
+PosLoyalty.exec.finalizeOrder('Cash');
 
 // Switching partners should work.
 ProductScreen.do.clickPartnerButton();
@@ -79,7 +80,7 @@ ProductScreen.do.clickCustomer('AAAAAAA');
 PosLoyalty.check.eWalletButtonState({ highlighted: true, text: getEWalletText('Pay') });
 PosLoyalty.do.clickEWalletButton(getEWalletText('Pay'));
 PosLoyalty.check.orderTotalIs('0.00');
-PosLoyalty.exec.finalizeOrder('Cash', '0');
+PosLoyalty.exec.finalizeOrder('Cash');
 
 // Refund with eWallet.
 // - Make an order to refund.
@@ -87,7 +88,7 @@ ProductScreen.do.clickPartnerButton();
 ProductScreen.do.clickCustomer('BBBBBBB');
 ProductScreen.exec.addOrderline('Whiteboard Pen', '1', '20', '20.00');
 PosLoyalty.check.orderTotalIs('20.00');
-PosLoyalty.exec.finalizeOrder('Cash', '20');
+PosLoyalty.exec.finalizeOrder('Cash');
 // - Refund order.
 ProductScreen.do.clickRefund();
 TicketScreen.check.filterIs('Paid');
@@ -98,8 +99,39 @@ ProductScreen.check.isShown();
 PosLoyalty.check.eWalletButtonState({ highlighted: true, text: getEWalletText('Refund') });
 PosLoyalty.do.clickEWalletButton(getEWalletText('Refund'));
 PosLoyalty.check.orderTotalIs('0.00');
-PosLoyalty.exec.finalizeOrder('Cash', '0');
+PosLoyalty.exec.finalizeOrder('Cash');
 
 Tour.register('EWalletProgramTour2', { test: true, url: '/pos/web' }, getSteps());
 
 //#endregion
+
+//#region ExpiredEWalletProgramTour
+
+startSteps();
+
+ProductScreen.do.confirmOpeningPopup();
+ProductScreen.do.clickHomeCategory();
+ProductScreen.do.clickPartnerButton();
+ProductScreen.do.clickCustomer('AAAA');
+ProductScreen.exec.addOrderline('Whiteboard Pen', '2', '6', '12.00');
+PosLoyalty.check.eWalletButtonState({ highlighted: false });
+PosLoyalty.do.clickEWalletButton();
+ErrorPopup.check.isShown();
+ErrorPopup.do.clickConfirm();
+
+Tour.register('ExpiredEWalletProgramTour', { test: true, url: '/pos/web' }, getSteps());
+
+//#endregion
+
+startSteps();
+ProductScreen.do.confirmOpeningPopup();
+ProductScreen.do.clickHomeCategory();
+ProductScreen.do.clickPartnerButton();
+ProductScreen.do.clickCustomer("partner_a");
+PosLoyalty.check.eWalletButtonState({ highlighted: false });
+ProductScreen.exec.addOrderline("product_a", "1");
+PosLoyalty.check.eWalletButtonState({ highlighted: true, text: getEWalletText("Pay") });
+PosLoyalty.do.clickEWalletButton(getEWalletText("Pay"));
+PosLoyalty.check.pointsAwardedAre("100"),
+PosLoyalty.exec.finalizeOrder("Cash", "90");
+Tour.register("PosLoyaltyPointsEwallet", { test: true, url: "/pos/web" }, getSteps());

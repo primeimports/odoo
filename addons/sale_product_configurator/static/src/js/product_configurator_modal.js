@@ -83,6 +83,8 @@ export const OptionalProductsModal = Dialog.extend(ServicesMixin, VariantMixin, 
             pricelist_id: self.pricelistId || false,
             add_qty: self.rootProduct.quantity,
             force_dialog: self.forceDialog,
+            no_attribute: self.rootProduct.no_variant_attribute_values,
+            custom_attribute: self.rootProduct.product_custom_attribute_values,
             context: _.extend({'quantity': self.rootProduct.quantity}, this.context),
         })
         .then(function (modalContent) {
@@ -190,8 +192,8 @@ export const OptionalProductsModal = Dialog.extend(ServicesMixin, VariantMixin, 
             var quantity = parseFloat($item.find('input[name="add_qty"]').val().replace(',', '.') || 1);
             var parentUniqueId = product.dataset.parentUniqueId;
             var uniqueId = product.dataset.uniqueId;
-            productCustomVariantValues = self.getCustomVariantValues($item);
-            noVariantAttributeValues = self.getNoVariantAttributeValues($item);
+            productCustomVariantValues = $item.find('.custom-attribute-info').data("attribute-value") || self.getCustomVariantValues($item);
+            noVariantAttributeValues = $item.find('.no-attribute-info').data("attribute-value") || self.getNoVariantAttributeValues($item);
 
             const productID = await self.selectOrCreateProduct(
                 $item,
@@ -375,9 +377,14 @@ export const OptionalProductsModal = Dialog.extend(ServicesMixin, VariantMixin, 
         ).then(function (productId) {
             $parent.find('.product_id').val(productId);
 
+            // Get currently displayed items to exclude them from being added again as options
+            const product_tmpl_ids = new Array(...$modal.find('input.product_template_id')).map(
+                (el) => parseInt(el.value)
+            );
             ajax.jsonRpc(self._getUri("/sale_product_configurator/optional_product_items"), 'call', {
                 'product_id': productId,
                 'pricelist_id': self.pricelistId || false,
+                'exclude_product_tmpl_ids': product_tmpl_ids,
             }).then(function (addedItem) {
                 var $addedItem = $(addedItem);
                 $modal.find('tr:last').after($addedItem);

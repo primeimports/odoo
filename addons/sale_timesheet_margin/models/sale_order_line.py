@@ -10,7 +10,14 @@ class SaleOrderLine(models.Model):
         timesheet_sols = self.filtered(
             lambda sol: sol.qty_delivered_method == 'timesheet' and not sol.product_id.standard_price
         )
-        super(SaleOrderLine, self - timesheet_sols)._compute_purchase_price()
+        # filter out the sale.order.lines called by this override of _compute_purchase_price for which
+        # we don't want the purchase price to be recomputed. Without filtring out the sale.order.lines
+        # for which the recomputation was triggered by a depency from another override of _compute_purchase_price
+        service_non_timesheet_sols = self.filtered(
+            lambda sol: not sol.is_expense and sol.is_service and
+            sol.product_id.service_policy == 'ordered_prepaid' and sol.state == 'sale'
+        )
+        super(SaleOrderLine, self - timesheet_sols - service_non_timesheet_sols)._compute_purchase_price()
         if timesheet_sols:
             group_amount = self.env['account.analytic.line'].read_group(
                 [('so_line', 'in', timesheet_sols.ids), ('project_id', '!=', False)],
@@ -23,10 +30,11 @@ class SaleOrderLine(models.Model):
             for line in timesheet_sols:
                 line = line.with_company(line.company_id)
                 product_cost = mapped_sol_timesheet_amount.get(line.id, line.product_id.standard_price)
-                if line.product_id.uom_id != line.company_id.project_time_mode_id and\
-                   line.product_id.uom_id.category_id.id == line.company_id.project_time_mode_id.category_id.id:
-                    product_cost = line.company_id.project_time_mode_id._compute_quantity(
+                product_uom = line.product_uom or line.product_id.uom_id
+                if product_uom != line.company_id.project_time_mode_id and\
+                   product_uom.category_id.id == line.company_id.project_time_mode_id.category_id.id:
+                    product_cost = product_uom._compute_quantity(
                         product_cost,
-                        line.product_id.uom_id
+                        line.company_id.project_time_mode_id
                     )
-                line.purchase_price = line._convert_price(product_cost, line.product_id.uom_id)
+                line.purchase_price = line._convert_price(product_cost, product_uom)

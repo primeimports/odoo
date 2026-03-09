@@ -3,6 +3,8 @@
 import {_t} from 'web.core';
 import publicWidget from 'web.public.widget';
 
+const CUSTOM_BUTTON_EXTRA_WIDTH = 10;
+
 publicWidget.registry.DonationSnippet = publicWidget.Widget.extend({
     selector: '.s_donation',
     disabledInEditableMode: false,
@@ -24,11 +26,23 @@ publicWidget.registry.DonationSnippet = publicWidget.Widget.extend({
             this._setBubble(this.$rangeSlider);
         }
         await this._displayCurrencies();
+        const customButtonEl = this.el.querySelector("#s_donation_amount_input");
+        if (customButtonEl) {
+            const canvasEl = document.createElement("canvas");
+            const context = canvasEl.getContext("2d");
+            context.font = window.getComputedStyle(customButtonEl).font;
+            const width = context.measureText(customButtonEl.placeholder).width;
+            customButtonEl.style.maxWidth = `${Math.ceil(width) + CUSTOM_BUTTON_EXTRA_WIDTH}px`;
+        }
     },
     /**
      * @override
      */
     destroy() {
+        const customButtonEl = this.el.querySelector("#s_donation_amount_input");
+        if (customButtonEl) {
+            customButtonEl.style.maxWidth = "";
+        }
         this.$target.find('.s_donation_currency').remove();
         this._deselectPrefilledButtons();
         this.$('.alert-danger').remove();
@@ -61,7 +75,7 @@ publicWidget.registry.DonationSnippet = publicWidget.Widget.extend({
         }).replaceWith(val);
 
         // Sorta magic numbers based on size of the native UI thumb (source: https://css-tricks.com/value-bubbles-for-range-inputs/)
-        $bubble[0].style.left = `calc(${newVal}% + (${tipOffsetLow}px))`;
+        $bubble[0].style.insetInlineStart = `calc(${newVal}% + (${tipOffsetLow}px))`;
     },
     /**
      * @private

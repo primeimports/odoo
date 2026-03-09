@@ -9,6 +9,7 @@ import { Model } from "@web/views/model";
 import { computeReportMeasures, processMeasure } from "@web/views/utils";
 
 export const SEP = " / ";
+const DATA_LIMIT = 80;
 
 /**
  * @typedef {import("@web/search/search_model").SearchParams} SearchParams
@@ -116,6 +117,12 @@ export class GraphModel extends Model {
         return this._fetchDataPoints(metaData);
     }
 
+    async forceLoadAll() {
+        const metaData = this._buildMetaData();
+        await this._fetchDataPoints(metaData, true);
+        this.notify();
+    }
+
     /**
      * @override
      */
@@ -132,6 +139,7 @@ export class GraphModel extends Model {
         if ("measure" in params) {
             const metaData = this._buildMetaData(params);
             await this._fetchDataPoints(metaData);
+            this.useSampleModel = false;
         } else {
             await this.race.getCurrentProm();
             this.metaData = Object.assign({}, this.metaData, params);
@@ -162,10 +170,23 @@ export class GraphModel extends Model {
         metaData.measure = context.graph_measure || metaData.measure;
         metaData.mode = context.graph_mode || metaData.mode;
         metaData.groupBy = groupBy.length ? groupBy : this.initialGroupBy;
+        if (metaData.mode !== "pie") {
+            metaData.order = "graph_order" in context ? context.graph_order : metaData.order;
+            if (comparison) {
+                metaData.stacked = false;
+            } else if ("graph_stacked" in context) {
+                metaData.stacked = context.graph_stacked;
+            }
+            if (metaData.mode === "line") {
+                metaData.cumulated =
+                    "graph_cumulated" in context ? context.graph_cumulated : metaData.cumulated;
+            }
+        }
 
         this._normalize(metaData);
 
         metaData.measures = computeReportMeasures(metaData.fields, metaData.fieldAttrs, [
+            ...(metaData.viewMeasures || []),
             metaData.measure,
         ]);
 
@@ -177,11 +198,12 @@ export class GraphModel extends Model {
      * several side effects. It can alter this.metaData and set this.dataPoints.
      * @protected
      * @param {Object} metaData
+     * @param {boolean} [forceUseAllDataPoints=false]
      */
-    async _fetchDataPoints(metaData) {
+    async _fetchDataPoints(metaData, forceUseAllDataPoints = false) {
         this.dataPoints = await this.keepLast.add(this._loadDataPoints(metaData));
         this.metaData = metaData;
-        this._prepareData();
+        this._prepareData(forceUseAllDataPoints);
     }
 
     /**
@@ -189,10 +211,11 @@ export class GraphModel extends Model {
      * datasets. This function returns the parameters data and labels used
      * to produce the charts.
      * @protected
-     * @param {Object[]}
+     * @param {Object[]} dataPoints
+     * @param {boolean} forceUseAllDataPoints
      * @returns {Object}
      */
-    _getData(dataPoints) {
+    _getData(dataPoints, forceUseAllDataPoints) {
         const { comparisonField, groupBy, mode } = this.metaData;
 
         let identify = false;
@@ -201,10 +224,27 @@ export class GraphModel extends Model {
         }
         const dateClasses = identify ? this._getDateClasses(dataPoints) : null;
 
+        const dataPtMapping = new WeakMap();
+        const datasetsTmp = {};
+        let exceeds = false;
+
         // dataPoints --> labels
         let labels = [];
         const labelMap = {};
         for (const dataPt of dataPoints) {
+            const datasetLabel = this._getDatasetLabel(dataPt);
+            if (!(datasetLabel in datasetsTmp)) {
+                if (!forceUseAllDataPoints && Object.keys(datasetsTmp).length >= DATA_LIMIT) {
+                    exceeds = true;
+                    continue;
+                }
+                datasetsTmp[datasetLabel] = {
+                    label: datasetLabel,
+                    originIndex: dataPt.originIndex,
+                }; // add the entry but don't initialize it entirely
+            }
+            dataPtMapping.set(dataPt, datasetsTmp[datasetLabel]);
+
             const x = dataPt.labels.slice(0, mode === "pie" ? undefined : 1);
             const trueLabel = x.length ? x.join(SEP) : this.env._t("Total");
             if (dateClasses) {
@@ -228,26 +268,28 @@ export class GraphModel extends Model {
         }
 
         // dataPoints + labels --> datasetsTmp --> datasets
-        const datasetsTmp = {};
         for (const dataPt of dataPoints) {
+            if (!dataPtMapping.has(dataPt)) {
+                continue;
+            }
+
             const { domain, labelIndex, originIndex, trueLabel, value } = dataPt;
-            const datasetLabel = this._getDatasetLabel(dataPt);
-            if (!(datasetLabel in datasetsTmp)) {
+            const dataset = dataPtMapping.get(dataPt);
+
+            if (!dataset.data) {
                 let dataLength = labels.length;
                 if (mode !== "pie" && dateClasses) {
                     dataLength = dateClasses.arrayLength(originIndex);
                 }
-                datasetsTmp[datasetLabel] = {
+                Object.assign(dataset, {
                     data: new Array(dataLength).fill(0),
                     trueLabels: labels.slice(0, dataLength), // should be good // check this in case identify = true
                     domains: new Array(dataLength).fill([]),
-                    label: datasetLabel,
-                    originIndex: originIndex,
-                };
+                });
             }
-            datasetsTmp[datasetLabel].data[labelIndex] = value;
-            datasetsTmp[datasetLabel].domains[labelIndex] = domain;
-            datasetsTmp[datasetLabel].trueLabels[labelIndex] = trueLabel;
+            dataset.data[labelIndex] = value;
+            dataset.domains[labelIndex] = domain;
+            dataset.trueLabels[labelIndex] = trueLabel;
         }
         // sort by origin
         let datasets = sortBy(Object.values(datasetsTmp), "originIndex");
@@ -272,7 +314,11 @@ export class GraphModel extends Model {
             }
         }
 
-        return { datasets, labels };
+        return {
+            datasets,
+            labels,
+            exceeds,
+        };
     }
 
     /**
@@ -357,18 +403,13 @@ export class GraphModel extends Model {
     _isValidData(dataPoints) {
         const { mode } = this.metaData;
         let somePositive = false;
-        let someNegative = false;
         if (mode === "pie") {
             for (const dataPt of dataPoints) {
                 if (dataPt.value > 0) {
                     somePositive = true;
-                } else if (dataPt.value < 0) {
-                    someNegative = true;
                 }
             }
-            if (someNegative && somePositive) {
-                return false;
-            }
+            return somePositive;
         }
         return true;
     }
@@ -526,12 +567,22 @@ export class GraphModel extends Model {
 
     /**
      * @protected
+     * @param {boolean} [forceUseAllDataPoints=false]
      */
-    async _prepareData() {
-        const processedDataPoints = this._getProcessedDataPoints();
+    async _prepareData(forceUseAllDataPoints = false) {
+        let processedDataPoints = this._getProcessedDataPoints();
         this.data = null;
-        if (this._isValidData(processedDataPoints)) {
-            this.data = this._getData(processedDataPoints);
+        if (this._isValidData(processedDataPoints) && this.metaData.mode === "pie") {
+            const positiveValues = [];
+            for (const dataPt of processedDataPoints) {
+                if (dataPt.value > 0) {
+                    positiveValues.push(dataPt);
+                }
+            }
+            processedDataPoints = positiveValues;
+        } else if (this.metaData.mode === "pie") {
+            processedDataPoints = [];
         }
+        this.data = this._getData(processedDataPoints, forceUseAllDataPoints);
     }
 }

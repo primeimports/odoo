@@ -78,10 +78,10 @@ tour.register("snippets_all_drag_and_drop", {
     // tour here. There is currently an issue with tours which don't have an URL
     // url: '/?enable_editor=1&snippets_names=s_showcase,s_numbers,s_...',
 }, [
-    websiteTourUtils.clickOnEdit(),
+    ...websiteTourUtils.clickOnEditAndWaitEditMode(),
     {
         content: "Ensure snippets are actually passed at the test.",
-        trigger: "#oe_snippets.o_loaded",
+        trigger: "body",
         run: function () {
             // safety check, otherwise the test might "break" one day and
             // receive no steps. The test would then not test anything anymore
@@ -108,6 +108,13 @@ tour.register("snippets_all_drag_and_drop", {
         content: "check setting are loaded, wait panel is visible",
         trigger: ".o_we_customize_panel"
     },
+    // We hide the header before starting to drop snippets. This prevents
+    // situations where the header's drop zones overlap with those of the #wrap,
+    // ensuring that a snippet is dropped in the #wrap as expected instead of
+    // the header.
+    websiteTourUtils.clickOnSnippet({id: "o_header_standard", name: "Header"}),
+    websiteTourUtils.changeOption("TopMenuVisibility", "we-select:has([data-visibility]) we-toggler"),
+    websiteTourUtils.changeOption("TopMenuVisibility", 'we-button[data-visibility="hidden"]'),
     {
         content: "click on 'BLOCKS' tab",
         trigger: ".o_we_add_snippet_btn"

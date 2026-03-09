@@ -14,8 +14,7 @@ class TestItEdiReverseCharge(TestItEdi):
 
     @classmethod
     def setUpClass(cls):
-        super().setUpClass(chart_template_ref='l10n_it.l10n_it_chart_template_generic',
-                           edi_format_ref='l10n_it_edi.edi_fatturaPA')
+        super().setUpClass()
 
         # Helper functions -----------
         def get_tag_ids(tag_codes):
@@ -152,6 +151,7 @@ class TestItEdiReverseCharge(TestItEdi):
             'move_type': 'in_invoice',
             'invoice_date': fields.Date.from_string('2022-03-24'),
             'invoice_date_due': fields.Date.from_string('2022-03-24'),
+            'date': fields.Date.from_string('2022-04-01'),
             'partner_id': cls.french_partner.id,
             'partner_bank_id': cls.test_bank.id,
             'invoice_line_ids': product_lines(
@@ -172,6 +172,7 @@ class TestItEdiReverseCharge(TestItEdi):
         cls.reverse_charge_bill_2 = cls.env['account.move'].with_company(cls.company).create(bill_data_2)
         cls.reverse_charge_refund = cls.reverse_charge_bill.with_company(cls.company)._reverse_moves([{
             'invoice_date': fields.Date.from_string('2022-03-24'),
+            'date': fields.Date.from_string('2022-04-01'),
         }])
 
         # Import bill San Marino
@@ -180,6 +181,7 @@ class TestItEdiReverseCharge(TestItEdi):
             'move_type': 'in_invoice',
             'invoice_date': fields.Date.from_string('2022-03-24'),
             'invoice_date_due': fields.Date.from_string('2022-03-24'),
+            'date': fields.Date.from_string('2022-04-01'),
             'partner_id': cls.san_marino_partner.id,
             'partner_bank_id': cls.test_bank.id,
             'invoice_line_ids': product_lines(
@@ -232,7 +234,7 @@ class TestItEdiReverseCharge(TestItEdi):
                     <DatiAnagrafici>
                         <IdFiscaleIVA>
                             <IdPaese>SM</IdPaese>
-                            <IdCodice>OO99999999999</IdCodice>
+                            <IdCodice>6784</IdCodice>
                         </IdFiscaleIVA>
                         <Anagrafica>
                             <Denominazione>Prospectra</Denominazione>
@@ -262,8 +264,21 @@ class TestItEdiReverseCharge(TestItEdi):
                 "//DatiPagamento/DettaglioPagamento/DataScadenzaPagamento": "<DataScadenzaPagamento/>",
             },
             xpaths_file={
-                "//DatiGeneraliDocumento/Numero": "<Numero/>",
-                "//DatiGeneraliDocumento/ImportoTotaleDocumento": "<ImportoTotaleDocumento>-1808.90</ImportoTotaleDocumento>",
+                "//DatiGenerali": f"""
+                    <DatiGenerali>
+                        <DatiGeneraliDocumento>
+                            <TipoDocumento>TD18</TipoDocumento>
+                            <Divisa>EUR</Divisa>
+                            <Data>2022-04-01</Data>
+                            <Numero/>
+                            <ImportoTotaleDocumento>-1808.91</ImportoTotaleDocumento>
+                        </DatiGeneraliDocumento>
+                        <DatiFattureCollegate>
+                            <IdDocumento>{self.reverse_charge_bill.name}</IdDocumento>
+                            <Data>{self.reverse_charge_refund.date}</Data>
+                        </DatiFattureCollegate>
+                    </DatiGenerali>
+                """,
                 "//DatiPagamento/DettaglioPagamento/DataScadenzaPagamento": "<DataScadenzaPagamento/>",
                 "(//DettaglioLinee/PrezzoUnitario)[1]": "<PrezzoUnitario>-800.400000</PrezzoUnitario>",
                 "(//DettaglioLinee/PrezzoUnitario)[2]": "<PrezzoUnitario>-800.400000</PrezzoUnitario>",

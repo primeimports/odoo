@@ -119,7 +119,7 @@
             <kanban string="Models">
                 <templates>
                     <t t-name="kanban-box">
-                        <div class="oe_kanban_details">
+                        <div class="oe_kanban_global_click oe_kanban_details">
                             <div><strong><field name="name"/></strong></div>
                             <div><field name="brand_id"/></div>
                         </div>
@@ -138,6 +138,7 @@
                 <group expand="1" string="Group By">
                     <filter name="groupby_brand" context="{'group_by' : 'brand_id'}" string="Contains Vehicles"/>
                 </group>
+                <filter string="Archived" name="inactive" domain="[('active','=',False)]"/>
             </search>
         </field>
     </record>
@@ -272,7 +273,7 @@
         <field name="name">fleet.vehicle.model.category.view.tree</field>
         <field name="model">fleet.vehicle.model.category</field>
         <field name="arch" type="xml">
-            <tree string="Model Category" editable="bottom">
+            <tree string="Model Category" editable="bottom" default_order="sequence, id">
                 <field name="sequence" widget="handle"/>
                 <field name="name"/>
             </tree>

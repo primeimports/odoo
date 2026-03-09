@@ -1,5 +1,6 @@
 /** @odoo-module **/
 
+import { isBrowserFirefox } from "@web/core/browser/feature_detection";
 import { browser } from "../browser/browser";
 import { _lt } from "../l10n/translation";
 import { registry } from "../registry";
@@ -34,6 +35,8 @@ export class UncaughtPromiseError extends UncaughtError {
     }
 }
 
+// FIXME: this error is misnamed and actually represends errors in third-party scripts
+// rename this in master
 export class UncaughtCorsError extends UncaughtError {
     constructor(message = _lt("Uncaught CORS Error")) {
         super(message);
@@ -44,7 +47,7 @@ export const errorService = {
     start(env) {
         function handleError(uncaughtError, retry = true) {
             let originalError = uncaughtError;
-            while (originalError && "cause" in originalError) {
+            while (originalError instanceof Error && "cause" in originalError) {
                 originalError = originalError.cause;
             }
             const services = env.services;
@@ -79,11 +82,21 @@ export const errorService = {
                 // ignore Chrome video internal error: https://crbug.com/809574
                 "ResizeObserver loop limit exceeded",
             ];
-            if (!error && errorsToIgnore.includes(message)) {
+            if (!(error instanceof Error) && errorsToIgnore.includes(message)) {
+                ev.preventDefault();
+                return;
+            }
+            const isRedactedError = !filename && !lineno && !colno;
+            const isThirdPartyScriptError =
+                isRedactedError ||
+                // Firefox doesn't hide details of errors occuring in third-party scripts, check origin explicitly
+                (isBrowserFirefox() && new URL(filename).origin !== window.location.origin);
+            // Don't display error dialogs for third party script errors unless we are in debug mode
+            if (isThirdPartyScriptError && !odoo.debug) {
                 return;
             }
             let uncaughtError;
-            if (!filename && !lineno && !colno) {
+            if (isRedactedError) {
                 uncaughtError = new UncaughtCorsError();
                 uncaughtError.traceback = env._t(
                     `Unknown CORS error\n\n` +

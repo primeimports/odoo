@@ -112,7 +112,7 @@
             <field name="type">service</field>
             <field name="uom_id" ref="uom.product_uom_unit"/>
             <field name="uom_po_id" ref="uom.product_uom_unit"/>
-            <field name="service_type">milestones</field>
+            <field name="service_type" model="product.product" eval="'milestones' if obj().env.user.has_group('project.group_project_milestone') else 'manual'" />
             <field name="service_tracking">task_in_project</field>
             <field name="project_template_id" ref="so_template_project"/>
         </record>
@@ -224,10 +224,10 @@
             <field name="product_uom_qty">4</field>
         </record>
 
-        <!-- Sale Order 'sale_order_3' (DECO) -->
+        <!-- Sale Order 'sale_order_3' (ACME) -->
         <record id="sale_order_3" model="sale.order">
             <field name="partner_id" ref="base.res_partner_2"/>
-            <field name="client_order_ref">DECO</field>
+            <field name="client_order_ref">ACME</field>
             <field name="user_id" ref="base.user_admin"/>
             <field name="tag_ids" eval="[Command.link(ref('sales_team.categ_oppor7'))]"/>
         </record>
@@ -348,7 +348,7 @@
             }"/>
         </function>
 
-        <!-- Assign DECO & to demo, clear description and set dates -->
+        <!-- Assign ACME to demo, clear description and set dates -->
         <function model="project.project" name="write">
             <value model="project.project" search="[('sale_line_id', '=', ref('sale_line_32'))]"/>
             <value eval="{

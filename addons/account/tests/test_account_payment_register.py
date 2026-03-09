@@ -1123,7 +1123,7 @@ class TestAccountPaymentRegister(AccountTestInvoicingCommon):
         ])
 
     def test_register_payment_invoice_comp_curr_payment_foreign_curr(self):
-        # Invoice of 400 USD (equivalent to 1200 Gol in 2016).
+        # Invoice of 600 USD (equivalent to 1200 Gol in 2017).
         invoice = self.env['account.move'].create({
             'move_type': 'out_invoice',
             'date': '2016-01-01',
@@ -1132,7 +1132,7 @@ class TestAccountPaymentRegister(AccountTestInvoicingCommon):
             'currency_id': self.company_data['currency'].id,
             'invoice_line_ids': [Command.create({
                 'product_id': self.product_a.id,
-                'price_unit': 400.0,
+                'price_unit': 600.0,
                 'tax_ids': [],
             })],
         })
@@ -1199,7 +1199,7 @@ class TestAccountPaymentRegister(AccountTestInvoicingCommon):
         active_ids = (invoice_1 + invoice_2 + refund_1 + refund_2).ids
         payments = self.env['account.payment.register'].with_context(active_model='account.move', active_ids=active_ids).create({
             'group_payment': False,
-        })._create_payments()
+        })._create_payments().sorted('ref')
 
         self.assertRecordValues(payments[0], [
             {
@@ -1312,3 +1312,12 @@ class TestAccountPaymentRegister(AccountTestInvoicingCommon):
                 'reconciled': False,
             },
         ])
+
+    def test_communication_wizard(self):
+        """
+        Tests that changing the payment reference updates the payment wizard's communication accordingly.
+        """
+        self.out_invoice_1.payment_reference = "test"
+        ctx = {'active_model': 'account.move', 'active_ids': self.out_invoice_1.ids}
+        wizard = self.env['account.payment.register'].with_context(**ctx).create({})
+        self.assertEqual(wizard.communication, "test")

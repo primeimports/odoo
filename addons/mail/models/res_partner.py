@@ -3,6 +3,7 @@
 
 from odoo import _, api, fields, models, tools
 from odoo.osv import expression
+from collections import defaultdict
 
 
 class Partner(models.Model):
@@ -40,15 +41,6 @@ class Partner(models.Model):
             WHERE R.res_partner_id = %s AND (R.is_read = false OR R.is_read IS NULL)""", (self.id,))
         return self.env.cr.dictfetchall()[0].get('needaction_count')
 
-    def _get_starred_count(self):
-        """ compute the number of starred of the current partner """
-        self.ensure_one()
-        self.env.cr.execute("""
-            SELECT count(*) as starred_count
-            FROM mail_message_res_partner_starred_rel R
-            WHERE R.res_partner_id = %s """, (self.id,))
-        return self.env.cr.dictfetchall()[0].get('starred_count')
-
     # ------------------------------------------------------------
     # MESSAGING
     # ------------------------------------------------------------
@@ -75,6 +67,11 @@ class Partner(models.Model):
     # ------------------------------------------------------------
     # ORM
     # ------------------------------------------------------------
+    @api.model
+    def _get_view_cache_key(self, view_id=None, view_type='form', **options):
+        """Add context variable force_email in the key as _get_view depends on it."""
+        key = super()._get_view_cache_key(view_id, view_type, **options)
+        return key + (self._context.get('force_email'),)
 
     @api.model
     @api.returns('self', lambda value: value.id)
@@ -129,7 +126,7 @@ class Partner(models.Model):
                     "id": main_user.id,
                     "isInternalUser": not main_user.share,
                 } if main_user else [('clear',)]
-            if 'guest' in self.env.context:
+            if not self.env.user._is_internal():
                 data.pop('email', None)
             partners_format[partner] = data
         return partners_format
@@ -145,7 +142,23 @@ class Partner(models.Model):
             ('mail_message_id.model', '!=', False),
             ('mail_message_id.res_id', '!=', 0),
         ], limit=100)
-        return notifications.mail_message_id._message_notification_format()
+        found = defaultdict(list)
+        for message in notifications.mail_message_id:
+            found[message.model].append(message.res_id)
+        existing = {
+            model: set(self.env[model].browse(ids).exists().ids)
+            for model, ids in found.items()
+        }
+        valid = notifications.filtered(
+            lambda n: (
+                not n.mail_message_id.model or not n.mail_message_id.res_id or
+                n.mail_message_id.res_id in existing[n.mail_message_id.model]
+            )
+        )
+        lost = notifications - valid
+        if lost:
+            lost.sudo().unlink()  # no unlink right except admin, ok to remove as lost anyway
+        return valid.mail_message_id._message_notification_format()
 
     def _get_channels_as_member(self):
         """Returns the channels of the partner."""
@@ -218,7 +231,11 @@ class Partner(models.Model):
             remaining_limit = limit - len(partners)
             if remaining_limit <= 0:
                 break
-            partners |= self.search(expression.AND([[('id', 'not in', partners.ids)], domain]), limit=remaining_limit)
+            # We are using _search to avoid the default order that is
+            # automatically added by the search method. "Order by" makes the query
+            # really slow.
+            query = self._search(expression.AND([[('id', 'not in', partners.ids)], domain]), limit=remaining_limit)
+            partners |= self.browse(query)
         partners_format = partners.mail_partner_format()
         if channel_id:
             member_by_partner = {member.partner_id: member for member in self.env['mail.channel.member'].search([('channel_id', '=', channel_id), ('partner_id', 'in', partners.ids)])}

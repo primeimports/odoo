@@ -24,7 +24,7 @@ class SaleOrderLine(models.Model):
 
     @api.onchange('product_uom_qty')
     def _onchange_service_product_uom_qty(self):
-        if self.state == 'sale' and self.product_id.type == 'service' and self.product_id.service_to_purchase:
+        if self.state == 'sale' and self.product_id.type == 'service' and self.product_id.with_company(self.company_id).service_to_purchase:
             if self.product_uom_qty < self._origin.product_uom_qty:
                 if self.product_uom_qty < self.qty_delivered:
                     return {}
@@ -55,8 +55,8 @@ class SaleOrderLine(models.Model):
         decreased_values = {}
         if 'product_uom_qty' in values:
             precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
-            increased_lines = self.sudo().filtered(lambda r: r.product_id.service_to_purchase and r.purchase_line_count and float_compare(r.product_uom_qty, values['product_uom_qty'], precision_digits=precision) == -1)
-            decreased_lines = self.sudo().filtered(lambda r: r.product_id.service_to_purchase and r.purchase_line_count and float_compare(r.product_uom_qty, values['product_uom_qty'], precision_digits=precision) == 1)
+            increased_lines = self.sudo().filtered(lambda r: r.product_id.with_company(r.company_id).service_to_purchase and r.purchase_line_count and float_compare(r.product_uom_qty, values['product_uom_qty'], precision_digits=precision) == -1)
+            decreased_lines = self.sudo().filtered(lambda r: r.product_id.with_company(r.company_id).service_to_purchase and r.purchase_line_count and float_compare(r.product_uom_qty, values['product_uom_qty'], precision_digits=precision) == 1)
             increased_values = {line.id: line.product_uom_qty for line in increased_lines}
             decreased_values = {line.id: line.product_uom_qty for line in decreased_lines}
 
@@ -172,13 +172,22 @@ class SaleOrderLine(models.Model):
             price_unit = self.env['account.tax'].sudo()._fix_tax_included_price_company(
                 supplierinfo.price, supplier_taxes, taxes, self.company_id)
             if purchase_order.currency_id and supplierinfo.currency_id != purchase_order.currency_id:
-                price_unit = supplierinfo.currency_id._convert(price_unit, purchase_order.currency_id, purchase_order.company_id, fields.datetime.today())
+                price_unit = supplierinfo.currency_id._convert(price_unit, purchase_order.currency_id, purchase_order.company_id, fields.Date.context_today(self))
             product_ctx.update({'seller_id': supplierinfo.id})
         else:
             product_ctx.update({'partner_id': purchase_order.partner_id.id})
 
+        product = self.product_id.with_context(**product_ctx)
+        name = product.display_name
+        if product.description_purchase:
+            name += '\n' + product.description_purchase
+
+        line_description = self.with_context(lang=self.order_id.partner_id.lang)._get_sale_order_line_multiline_description_variants()
+        if line_description:
+            name += line_description
+
         return {
-            'name': self.product_id.with_context(**product_ctx).display_name,
+            'name': name,
             'product_qty': purchase_qty_uom,
             'product_id': self.product_id.id,
             'product_uom': self.product_id.uom_po_id.id,
@@ -188,6 +197,12 @@ class SaleOrderLine(models.Model):
             'order_id': purchase_order.id,
             'sale_line_id': self.id,
         }
+
+    def _retrieve_purchase_partner(self):
+        """ In case we want to explicitely name a partner from whom we want to buy or receive products
+        """
+        self.ensure_one()
+        return False
 
     def _purchase_service_create(self, quantity=False):
         """ On Sales Order confirmation, some lines (services ones) can create a purchase order line and maybe a purchase order.
@@ -201,7 +216,7 @@ class SaleOrderLine(models.Model):
         for line in self:
             line = line.with_company(line.company_id)
             # determine vendor of the order (take the first matching company and product)
-            suppliers = line.product_id._select_seller(quantity=line.product_uom_qty, uom_id=line.product_uom)
+            suppliers = line.product_id._select_seller(partner_id=line._retrieve_purchase_partner(), quantity=line.product_uom_qty, uom_id=line.product_uom)
             if not suppliers:
                 raise UserError(_("There is no vendor associated to the product %s. Please define a vendor for this product.") % (line.product_id.display_name,))
             supplierinfo = suppliers[0]
@@ -245,6 +260,7 @@ class SaleOrderLine(models.Model):
         """
         sale_line_purchase_map = {}
         for line in self:
+            line = line.with_company(line.company_id)
             # Do not regenerate PO line if the SO line has already created one in the past (SO cancel/reconfirmation case)
             if line.product_id.service_to_purchase and not line.purchase_line_count:
                 result = line._purchase_service_create()

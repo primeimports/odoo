@@ -162,9 +162,13 @@ li > p {
 [class^="col-lg-"] {
     min-height: 24px;
 }
-.input-group {
+// TODO this was added a compatibility layer for old layouts when we switched
+// to Bootstrap 4. It should be removed at some point, to not have to support
+// invalid-feedback with that awful :where selector.
+.input-group:where(:not(:has(.was-validated :invalid ~ .invalid-feedback, .is-invalid ~ .invalid-feedback))) {
     flex-flow: row nowrap;
 }
+
 .list-group-item:not([class*="list-group-item-"]):not(.active) {
     color: color-contrast($list-group-bg);
 }
@@ -204,6 +208,7 @@ img, .media_iframe_video, .o_image {
 }
 .oe_search_box {
     padding-right: 23px;
+    text-overflow: ellipsis;
 }
 
 // Kept for (up to) saas-12 compatibility
@@ -342,6 +347,10 @@ img, .media_iframe_video, .o_image {
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+
+            &:has(a) {
+                color: $primary;
+            }
         }
     }
 
@@ -480,8 +489,8 @@ form label {
 
         .o_portal_chatter_message_title {
             p {
-                font-size:85%;
-                color:$o-main-color-muted;
+                font-size: 85%;
+                color: $text-muted;
                 margin: 0px;
             }
         }
@@ -562,4 +571,3 @@ form label {
         }
     }
 }
-

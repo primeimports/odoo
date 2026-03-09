@@ -7,6 +7,7 @@ import re
 from odoo.addons.http_routing.models.ir_http import slugify
 from odoo.addons.website.tools import text_from_html
 from odoo import api, fields, models
+from odoo.exceptions import AccessError
 from odoo.osv import expression
 from odoo.tools import escape_psql
 from odoo.tools.translate import _
@@ -91,12 +92,22 @@ class Page(models.Model):
         for page in self:
             page.website_url = page.url
 
+    @api.depends_context('uid')
+    def _compute_can_publish(self):
+        # Note: this `if`'s purpose it to optimize the way this is computed for
+        # multiple records.
+        if self.env.user.has_group('website.group_website_designer'):
+            for record in self:
+                record.can_publish = True
+        else:
+            super()._compute_can_publish()
+
     def _get_most_specific_pages(self):
         ''' Returns the most specific pages in self. '''
         ids = []
         previous_page = None
         # Iterate a single time on the whole list sorted on specific-website first.
-        for page in self.sorted(key=lambda p: (p.url, not p.website_id)):
+        for page in self.sorted(key=lambda p: (p.url or '', not p.website_id)):
             if not previous_page or page.url != previous_page.url:
                 ids.append(page.id)
             previous_page = page
@@ -178,6 +189,12 @@ class Page(models.Model):
                             'url_to': url,
                             'website_id': website_id,
                         })
+                    # Sync website's homepage URL
+                    website = self.env['website'].get_current_website()
+                    page_url_normalized = {'homepage_url': page.url}
+                    website._handle_homepage_url(page_url_normalized)
+                    if website.homepage_url == page_url_normalized['homepage_url']:
+                        website.homepage_url = url
                 vals['url'] = url
 
             # If name has changed, check for key uniqueness
@@ -201,7 +218,17 @@ class Page(models.Model):
         domain = [website.website_domain()]
         if not self.env.user.has_group('website.group_website_designer'):
             # Rule must be reinforced because of sudo.
-            domain.append([('website_published', '=', True)])
+            domain.append([
+                ('website_published', '=', True),
+                ('website_indexed', '=', True),
+            ])
+            # Prevent accessing unaccessible pages
+            domain.append([('visibility', '!=', 'password')])
+            if website.is_public_user():
+                domain.append([('visibility', '!=', 'connected')])
+            domain.append(expression.OR([
+                [('groups_id', '=', False)], [('groups_id', 'in', self.env.user.groups_id.ids)]
+            ]))
 
         search_fields = ['name', 'url']
         fetch_fields = ['id', 'name', 'url']
@@ -226,51 +253,69 @@ class Page(models.Model):
     @api.model
     def _search_fetch(self, search_detail, search, limit, order):
         with_description = 'description' in search_detail['mapping']
-        results, count = super()._search_fetch(search_detail, search, limit, order)
-        if with_description and search:
+        # Cannot rely on the super's _search_fetch because the search must be
+        # performed among the most specific pages only.
+        fields = search_detail['search_fields']
+        base_domain = search_detail['base_domain']
+        domain = self._search_build_domain(base_domain, search, fields, search_detail.get('search_extra'))
+        most_specific_pages = self.env['website']._get_website_pages(
+            domain=expression.AND(base_domain), order=order
+        )
+        results = most_specific_pages.filtered_domain(domain)  # already sudo
+
+        if with_description and search and most_specific_pages:
             # Perform search in translations
             # TODO Remove when domains will support xml_translate fields
             query = sql.SQL("""
-                SELECT {table}.id
+                SELECT DISTINCT {table}.id
                 FROM {table}
                 LEFT JOIN ir_ui_view v ON {table}.view_id = v.id
-                WHERE v.name ILIKE {search}
-                OR COALESCE(v.arch_db->>{lang}, v.arch_db->>'en_US') ILIKE {search}
+                WHERE (v.name ILIKE {search}
+                OR COALESCE(v.arch_db->>{lang}, v.arch_db->>'en_US') ILIKE {search})
+                AND {table}.id IN {ids}
                 LIMIT {limit}
             """).format(
                 table=sql.Identifier(self._table),
                 search=sql.Placeholder('search'),
                 lang=sql.Literal(self.env.lang or 'en_US'),
+                ids=sql.Placeholder('ids'),
                 limit=sql.Placeholder('limit'),
             )
             self.env.cr.execute(query, {
                 'search': '%%%s%%' % escape_psql(search),
-                'limit': limit,
+                'ids': tuple(most_specific_pages.ids),
+                'limit': len(most_specific_pages.ids),
             })
             ids = {row[0] for row in self.env.cr.fetchall()}
-            ids.update(results.ids)
-            domains = search_detail['base_domain'].copy()
-            domains.append([('id', 'in', list(ids))])
-            domain = expression.AND(domains)
-            model = self.sudo() if search_detail.get('requires_sudo') else self
-            results = model.search(
-                domain,
-                limit=limit,
-                order=search_detail.get('order', order)
-            )
-            count = max(count, len(results))
+            if ids:
+                ids.update(results.ids)
+                domains = search_detail['base_domain'].copy()
+                domains.append([('id', 'in', list(ids))])
+                domain = expression.AND(domains)
+                model = self.sudo() if search_detail.get('requires_sudo') else self
+                results = model.search(
+                    domain,
+                    limit=len(ids),
+                    order=search_detail.get('order', order)
+                )
 
         def filter_page(search, page, all_pages):
-            # Search might have matched words in the xml tags and parameters therefore we make
-            # sure the terms actually appear inside the text.
-            text = '%s %s %s' % (page.name, page.url, text_from_html(page.arch))
-            pattern = '|'.join([re.escape(search_term) for search_term in search.split()])
-            return re.findall('(%s)' % pattern, text, flags=re.I) if pattern else False
-        if 'url' not in order:
-            results = results._get_most_specific_pages()
-        if search and with_description:
-            results = results.filtered(lambda result: filter_page(search, result, results))
-        return results, count
+            # Exclude pages that do not pass ACL.
+            try:
+                plain_page = page.sudo(False)
+                plain_page.check_access_rule('read')
+                plain_page.view_id.check_access_rule('read')
+            except AccessError:
+                return False
+            if search and with_description:
+                # Search might have matched words in the xml tags and parameters therefore we make
+                # sure the terms actually appear inside the text.
+                text = '%s %s %s' % (page.name, page.url, text_from_html(page.arch))
+                pattern = '|'.join([re.escape(search_term) for search_term in search.split()])
+                return re.findall('(%s)' % pattern, text, flags=re.I) if pattern else False
+            return True
+        results = results.filtered(lambda result: filter_page(search, result, results))
+        return results[:limit], len(results)
 
     def action_page_debug_view(self):
         return {

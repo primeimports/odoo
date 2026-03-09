@@ -7,9 +7,12 @@ import {
     triggerEvent,
     clickSave,
     editInput,
+    patchDate,
 } from "@web/../tests/helpers/utils";
 import { makeView, setupViewRegistries } from "@web/../tests/views/helpers";
 import { pagerNext } from "@web/../tests/search/helpers";
+
+const { DateTime } = luxon;
 
 const MY_IMAGE =
     "iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==";
@@ -31,7 +34,11 @@ QUnit.module("Fields", (hooks) => {
             models: {
                 partner: {
                     fields: {
-                        display_name: { string: "Displayed name", type: "char", searchable: true },
+                        display_name: {
+                            string: "Displayed name",
+                            type: "char",
+                            searchable: true,
+                        },
                         timmy: {
                             string: "pokemon",
                             type: "many2many",
@@ -78,7 +85,7 @@ QUnit.module("Fields", (hooks) => {
     QUnit.module("ImageField");
 
     QUnit.test("ImageField is correctly rendered", async function (assert) {
-        assert.expect(10);
+        assert.expect(12);
 
         serverData.models.partner.records[0].__last_update = "2017-02-08 10:00:00";
         serverData.models.partner.records[0].document = MY_IMAGE;
@@ -135,6 +142,19 @@ QUnit.module("Fields", (hooks) => {
             "the image should correctly set its attributes"
         );
 
+        const computedStyle = window.getComputedStyle(
+            target.querySelector(".o_field_widget[name='document'] img")
+        );
+        assert.strictEqual(
+            computedStyle.width,
+            "90px",
+            "the image should correctly set its attributes"
+        );
+        assert.strictEqual(
+            computedStyle.height,
+            "90px",
+            "the image should correctly set its attributes"
+        );
         assert.containsOnce(
             target,
             ".o_field_image .o_select_file_button",
@@ -277,6 +297,10 @@ QUnit.module("Fields", (hooks) => {
             rec.document = "3 kb";
             rec.__last_update = "2022-08-05 08:37:00"; // 1659688620000
 
+            // 1659692220000, 1659695820000
+            const lastUpdates = ["2022-08-05 09:37:00", "2022-08-05 10:37:00"];
+            let index = 0;
+
             await makeView({
                 type: "form",
                 resModel: "partner",
@@ -289,8 +313,9 @@ QUnit.module("Fields", (hooks) => {
                     </form>`,
                 mockRPC(_route, { method, args }) {
                     if (method === "write") {
-                        args[1].__last_update = "2022-08-05 09:37:00"; // 1659692220000
+                        args[1].__last_update = lastUpdates[index];
                         args[1].document = "4 kb";
+                        index++;
                     }
                 },
             });
@@ -324,8 +349,72 @@ QUnit.module("Fields", (hooks) => {
                 getUnique(target.querySelector(".o_field_image img")),
                 "1659692220000"
             );
+
+            // Change the image again. After clicking save, it should have the correct new url.
+            await editInput(
+                target,
+                "input[type=file]",
+                new File(
+                    [Uint8Array.from([...atob(PRODUCT_IMAGE)].map((c) => c.charCodeAt(0)))],
+                    "fake_file2.gif",
+                    { type: "png" }
+                )
+            );
+            assert.strictEqual(
+                target.querySelector("div[name=document] img").dataset.src,
+                `data:image/gif;base64,${PRODUCT_IMAGE}`
+            );
+
+            await clickSave(target);
+            assert.strictEqual(
+                getUnique(target.querySelector(".o_field_image img")),
+                "1659695820000"
+            );
         }
     );
+
+    QUnit.test("save record with image field modified by onchange", async function (assert) {
+        serverData.models.partner.onchanges = {
+            foo: (data) => {
+                data.document = MY_IMAGE;
+            },
+        };
+        const rec = serverData.models.partner.records.find((rec) => rec.id === 1);
+        rec.document = "3 kb";
+        rec.__last_update = "2022-08-05 08:37:00"; // 1659688620000
+
+        // 1659692220000
+        const lastUpdates = ["2022-08-05 09:37:00"];
+        let index = 0;
+
+        await makeView({
+            type: "form",
+            resModel: "partner",
+            resId: 1,
+            serverData,
+            arch: /* xml */ `
+                    <form>
+                        <field name="foo"/>
+                        <field name="document" widget="image" />
+                    </form>`,
+            mockRPC(_route, { method, args }) {
+                if (method === "write") {
+                    args[1].__last_update = lastUpdates[index];
+                    args[1].document = "3 kb";
+                    index++;
+                }
+            },
+        });
+        assert.strictEqual(getUnique(target.querySelector(".o_field_image img")), "1659688620000");
+        await editInput(target, "[name='foo'] input", "grrr");
+        assert.strictEqual(
+            target.querySelector("div[name=document] img").dataset.src,
+            `data:image/png;base64,${MY_IMAGE}`
+        );
+
+        await clickSave(target);
+        assert.strictEqual(getUnique(target.querySelector(".o_field_image img")), "1659692220000");
+    });
 
     QUnit.test("ImageField: option accepted_file_extensions", async function (assert) {
         await makeView({
@@ -360,20 +449,43 @@ QUnit.module("Fields", (hooks) => {
                 </form>`,
         });
         const imgs = target.querySelectorAll(".o_field_widget img");
+
         assert.deepEqual(
             [imgs[0].attributes.width, imgs[0].attributes.height],
             [undefined, undefined],
             "if both size are set to 0, both attributes are undefined"
         );
+
         assert.deepEqual(
             [imgs[1].attributes.width, imgs[1].attributes.height.value],
             [undefined, "50"],
             "if only the width is set to 0, the width attribute is not set on the img"
         );
         assert.deepEqual(
+            [
+                imgs[1].style.width,
+                imgs[1].style.maxWidth,
+                imgs[1].style.height,
+                imgs[1].style.maxHeight,
+            ],
+            ["auto", "100%", "", "50px"],
+            "the image should correctly set its attributes"
+        );
+
+        assert.deepEqual(
             [imgs[2].attributes.width.value, imgs[2].attributes.height],
             ["50", undefined],
             "if only the height is set to 0, the height attribute is not set on the img"
+        );
+        assert.deepEqual(
+            [
+                imgs[2].style.width,
+                imgs[2].style.maxWidth,
+                imgs[2].style.height,
+                imgs[2].style.maxHeight,
+            ],
+            ["", "50px", "auto", "100%"],
+            "the image should correctly set its attributes"
         );
     });
 
@@ -404,7 +516,8 @@ QUnit.module("Fields", (hooks) => {
     });
 
     QUnit.test("ImageField: zoom and zoom_delay options (edit)", async function (assert) {
-        serverData.models.partner.records[0].document = MY_IMAGE;
+        serverData.models.partner.records[0].document = "3 kb";
+        serverData.models.partner.records[0].__last_update = "2022-08-05 08:37:00";
 
         await makeView({
             type: "form",
@@ -418,8 +531,15 @@ QUnit.module("Fields", (hooks) => {
         });
 
         assert.ok(
-            !target.querySelector(".o_field_image img").dataset["tooltipInfo"],
-            "the tooltip is not present in edition"
+            JSON.parse(
+                target.querySelector(".o_field_image img").dataset["tooltipInfo"]
+            ).url.endsWith("/web/image?model=partner&id=1&field=document&unique=1659688620000"),
+            "tooltip show the full image from the field value"
+        );
+        assert.strictEqual(
+            target.querySelector(".o_field_image img").dataset["tooltipDelay"],
+            "600",
+            "tooltip has the right delay"
         );
     });
 
@@ -465,7 +585,10 @@ QUnit.module("Fields", (hooks) => {
     QUnit.test("ImageField in subviews is loaded correctly", async function (assert) {
         serverData.models.partner.records[0].__last_update = "2017-02-08 10:00:00";
         serverData.models.partner.records[0].document = MY_IMAGE;
-        serverData.models.partner_type.fields.image = { name: "image", type: "binary" };
+        serverData.models.partner_type.fields.image = {
+            name: "image",
+            type: "binary",
+        };
         serverData.models.partner_type.records[0].image = PRODUCT_IMAGE;
         serverData.models.partner.records[0].timmy = [12];
 
@@ -508,7 +631,10 @@ QUnit.module("Fields", (hooks) => {
     });
 
     QUnit.test("ImageField in x2many list is loaded correctly", async function (assert) {
-        serverData.models.partner_type.fields.image = { name: "image", type: "binary" };
+        serverData.models.partner_type.fields.image = {
+            name: "image",
+            type: "binary",
+        };
         serverData.models.partner_type.records[0].image = PRODUCT_IMAGE;
         serverData.models.partner.records[0].timmy = [12];
 
@@ -564,6 +690,60 @@ QUnit.module("Fields", (hooks) => {
         );
     });
 
+    QUnit.test("ImageField is reset when changing record", async function (assert) {
+        const imageData = Uint8Array.from([...atob(MY_IMAGE)].map((c) => c.charCodeAt(0)));
+        await makeView({
+            type: "form",
+            resModel: "partner",
+            serverData,
+            arch: `<form>
+                <field name="document" widget="image" options="{'size': [90, 90]}"/>
+            </form>`,
+        });
+
+        async function setFiles() {
+            const list = new DataTransfer();
+            list.items.add(new File([imageData], "fake_file.png", { type: "png" }));
+            const fileInput = target.querySelector("input[type=file]");
+            fileInput.files = list.files;
+            fileInput.dispatchEvent(new Event("change"));
+            // It can take some time to encode the data as a base64 url
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            // Wait for a render
+            await nextTick();
+        }
+
+        assert.strictEqual(
+            target.querySelector("img[data-alt='Binary file']").dataset.src,
+            "/web/static/img/placeholder.png",
+            "image field should not be set"
+        );
+
+        await setFiles();
+        assert.ok(
+            target
+                .querySelector("img[data-alt='Binary file']")
+                .dataset.src.includes("data:image/png;base64"),
+            "image field should be set"
+        );
+
+        await clickSave(target);
+        await click(target, ".o_form_button_create");
+        assert.strictEqual(
+            target.querySelector("img[data-alt='Binary file']").dataset.src,
+            "/web/static/img/placeholder.png",
+            "image field should be reset"
+        );
+
+        await setFiles();
+        assert.ok(
+            target
+                .querySelector("img[data-alt='Binary file']")
+                .dataset.src.includes("data:image/png;base64"),
+            "image field should be set"
+        );
+    });
+
     QUnit.test("unique in url doesn't change on onchange", async (assert) => {
         serverData.models.partner.onchanges = {
             foo: () => {},
@@ -585,14 +765,8 @@ QUnit.module("Fields", (hooks) => {
                 </form>`,
             mockRPC(route, { method, args }) {
                 assert.step(method);
-                if (method === "onchange") {
-                    return {
-                        value: {
-                            __last_update: "", // actual return of the server
-                        },
-                    };
-                }
                 if (method === "write") {
+                    // 1659692220000
                     args[1].__last_update = "2022-08-05 09:37:00";
                 }
             },
@@ -613,7 +787,7 @@ QUnit.module("Fields", (hooks) => {
         await clickSave(target);
         assert.verifySteps(["write", "read"]);
 
-        assert.strictEqual(getUnique(target.querySelector(".o_field_image img")), "1659688620000");
+        assert.strictEqual(getUnique(target.querySelector(".o_field_image img")), "1659692220000");
     });
 
     QUnit.test("unique in url change on record change", async (assert) => {
@@ -646,4 +820,144 @@ QUnit.module("Fields", (hooks) => {
         await pagerNext(target);
         assert.strictEqual(getUnique(target.querySelector(".o_field_image img")), "1659692220000");
     });
+
+    QUnit.test(
+        "unique in url does not change on record change if no_reload option is set",
+        async (assert) => {
+            const rec = serverData.models.partner.records.find((rec) => rec.id === 1);
+            rec.document = "3 kb";
+            rec.__last_update = "2022-08-05 08:37:00";
+
+            await makeView({
+                resIds: [1, 2],
+                resId: 1,
+                type: "form",
+                resModel: "partner",
+                serverData,
+                arch: `
+                    <form>
+                        <field name="document" widget="image" required="1" options="{'no_reload': true}" />
+                        <field name="__last_update" />
+                    </form>`,
+            });
+
+            function getUnique(target) {
+                const src = target.dataset.src;
+                return new URL(src).searchParams.get("unique");
+            }
+
+            assert.strictEqual(
+                getUnique(target.querySelector(".o_field_image img")),
+                "1659688620000"
+            );
+            await editInput(
+                target.querySelector(
+                    "div[name='__last_update'] > div > input",
+                    "2022-08-05 08:39:00"
+                )
+            );
+            await click(target, ".o_form_button_save");
+            assert.strictEqual(
+                getUnique(target.querySelector(".o_field_image img")),
+                "1659688620000"
+            );
+        }
+    );
+
+    QUnit.test(
+        "url should not use the record last updated date when the field is related",
+        async function (assert) {
+            serverData.models.partner.fields.related = {
+                name: "Binary",
+                type: "binary",
+                related: "user.image",
+            };
+
+            serverData.models.partner.fields.user = {
+                name: "User",
+                type: "many2one",
+                relation: "user",
+                default: 1,
+            };
+
+            serverData.models.user = {
+                fields: {
+                    image: {
+                        name: "Image",
+                        type: "binary",
+                    },
+                },
+                records: [
+                    {
+                        id: 1,
+                        image: "3 kb",
+                    },
+                ],
+            };
+
+            serverData.models.partner.records[0].__last_update = "2017-02-08 10:00:00";
+
+            patchDate(2017, 1, 6, 11, 0, 0);
+
+            await makeView({
+                type: "form",
+                resModel: "partner",
+                resId: 1,
+                serverData,
+                arch: `
+                <form>
+                    <sheet>
+                        <group>
+                            <field name="foo" />
+                            <field name="user"/>
+                            <field name="related" widget="image"/>
+                        </group>
+                    </sheet>
+                </form>`,
+                async mockRPC(route, { args }, performRpc) {
+                    if (route === "/web/dataset/call_kw/partner/read") {
+                        const res = await performRpc(...arguments);
+                        // The mockRPC doesn't implement related fields
+                        res[0].related = "3 kb";
+                        return res;
+                    }
+                },
+            });
+
+            const initialUnique = Number(getUnique(target.querySelector(".o_field_image img")));
+            assert.ok(
+                DateTime.fromMillis(initialUnique).hasSame(DateTime.fromISO("2017-02-06"), "days")
+            );
+
+            await editInput(target, ".o_field_widget[name='foo'] input", "grrr");
+
+            // the unique should be the same
+            assert.strictEqual(
+                initialUnique,
+                Number(getUnique(target.querySelector(".o_field_image img")))
+            );
+
+            patchDate(2017, 1, 9, 11, 0, 0);
+            await editInput(
+                target,
+                "input[type=file]",
+                new File(
+                    [Uint8Array.from([...atob(MY_IMAGE)].map((c) => c.charCodeAt(0)))],
+                    "fake_file.png",
+                    { type: "png" }
+                )
+            );
+            assert.strictEqual(
+                target.querySelector(".o_field_image img").dataset.src,
+                `data:image/png;base64,${MY_IMAGE}`
+            );
+
+            patchDate(2017, 1, 9, 12, 0, 0);
+
+            await clickSave(target);
+
+            const unique = Number(getUnique(target.querySelector(".o_field_image img")));
+            assert.ok(DateTime.fromMillis(unique).hasSame(DateTime.fromISO("2017-02-09"), "days"));
+        }
+    );
 });

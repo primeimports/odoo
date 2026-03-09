@@ -14,6 +14,7 @@ from psycopg2.extras import Json
 
 from odoo.exceptions import AccessError, ValidationError
 from odoo.tests import common
+from odoo.addons.base.tests.common import TransactionCaseWithUserDemo
 from odoo.tools import mute_logger, view_validation
 from odoo.addons.base.models.ir_ui_view import (
     transfer_field_to_modifiers, transfer_node_to_modifiers, simplify_modifiers,
@@ -30,7 +31,7 @@ class ViewXMLID(common.TransactionCase):
         self.assertTrue(view.model_data_id)
         self.assertEqual(view.model_data_id.complete_name, 'base.view_company_form')
 
-class ViewCase(common.TransactionCase):
+class ViewCase(TransactionCaseWithUserDemo):
     def setUp(self):
         super(ViewCase, self).setUp()
         self.View = self.env['ir.ui.view']
@@ -741,6 +742,40 @@ class TestTemplating(ViewCase):
     def setUp(self):
         super(TestTemplating, self).setUp()
         self.patch(self.registry, '_init', False)
+
+    def test_branding_t0(self):
+        view1 = self.View.create({
+            'name': "Base view",
+            'type': 'qweb',
+            'arch': """<root>
+                <div role="search">
+                    <input type="search" name="search"/>
+                    <button type="submit">
+                        <i class="oi-search"/>
+                    </button>
+                </div>
+            </root>
+            """
+        })
+        self.View.create({
+            'name': "Extension view",
+            'type': 'qweb',
+            'inherit_id': view1.id,
+            'arch': """<xpath expr="//div[@role='search']" position="replace">
+                <form>
+                    <t>$0</t>
+                </form>
+            </xpath>
+            """
+        })
+        arch_string = view1.with_context(inherit_branding=True).get_combined_arch()
+        arch = etree.fromstring(arch_string)
+        self.View.distribute_branding(arch)
+        [initial] = arch.xpath("//div[@role='search']")
+        self.assertEqual(
+            '1',
+            initial.get('data-oe-no-branding'),
+            'Injected view must be marked as no-branding')
 
     def test_branding_inherit(self):
         view1 = self.View.create({
@@ -1477,6 +1512,42 @@ class TestTemplating(ViewCase):
             " the main view's"
         )
 
+    def test_branding_remove_add_text(self):
+        view1 = self.View.create({
+            'name': "Base view",
+            'type': 'qweb',
+            'arch': """<root>
+                <item order="1">
+                    <item/>
+                </item>
+            </root>""",
+        })
+        view2 = self.View.create({
+            'name': "Extension",
+            'type': 'qweb',
+            'inherit_id': view1.id,
+            'arch': """
+            <data>
+                <xpath expr="/root/item/item" position="replace" />
+                <xpath expr="/root/item" position="inside">A<div/>B</xpath>
+            </data>
+            """
+        })
+
+        arch_string = view1.with_context(inherit_branding=True).get_combined_arch()
+        arch = etree.fromstring(arch_string)
+        self.View.distribute_branding(arch)
+
+        expected = etree.fromstring(f"""
+        <root>
+            <item order="1">
+                A
+                <div data-oe-id="{view2.id}" data-oe-xpath="/data/xpath[2]/div" data-oe-model="ir.ui.view" data-oe-field="arch"/>
+                B
+            </item>
+        </root>
+        """)
+        self.assertEqual(arch, expected)
 
 class TestViews(ViewCase):
 
@@ -2426,7 +2497,7 @@ class TestViews(ViewCase):
                 </form>
             """,
         })
-        user_demo = self.env.ref('base.user_demo')
+        user_demo = self.user_demo
         # Make sure demo doesn't have the base.group_system
         self.assertFalse(self.env['res.partner'].with_user(user_demo).env.user.has_group('base.group_system'))
         arch = self.env['res.partner'].with_user(user_demo).get_view(view_id=view.id)['arch']
@@ -2888,6 +2959,23 @@ class TestViews(ViewCase):
             </form>
         """, valid=True)
 
+    @mute_logger('odoo.addons.base.models.ir_ui_view')
+    def test_empty_groups_attrib(self):
+        """Ensure we allow empty groups attribute"""
+        view = self.View.create({
+            'name': 'foo',
+            'model': 'res.partner',
+            'arch': """
+                <form>
+                    <field name="name" groups="" />
+                </form>
+            """,
+        })
+        arch = self.env['res.partner'].get_view(view_id=view.id)['arch']
+        tree = etree.fromstring(arch)
+        nodes = tree.xpath("//field[@name='name' and not (@groups)]")
+        self.assertEqual(1, len(nodes))
+
     def test_attrs_groups_with_groups_in_model(self):
         """Tests the attrs is well processed to modifiers for a field node combining:
         - a `groups` attribute on the field node in the view architecture
@@ -3205,6 +3293,9 @@ class TestViews(ViewCase):
             'A <graph> can only contains <field> nodes, found a <label>'
         )
 
+    def test_graph_attributes(self):
+        self.assertValid('<graph string="Graph" cumulated="1" ><field name="model" type="row"/><field name="inherit_id" type="measure"/></graph>')
+
     def test_view_ref(self):
         view = self.assertValid(
             """
@@ -3370,6 +3461,29 @@ class TestViewTranslations(common.TransactionCase):
         self.assertIn("<i>", view_fr.arch_db)
         self.assertIn("<i>", view_fr.arch)
 
+    def test_no_groups_for_inherited(self):
+        parent = self.env["ir.ui.view"].create({
+            "name": "test_no_groups_for_inherited_parent",
+            "model": "ir.ui.view",
+            "arch": "<form></form>",
+        })
+
+        view = self.env["ir.ui.view"].create({
+            "name": "test_no_groups_for_inherited_child",
+            "model": "ir.ui.view",
+            "arch": "<data></data>",
+            "inherit_id": parent.id,
+            "mode": "extension",
+        })
+
+        with self.assertRaises(ValidationError):
+            view.write({'groups_id': [1]})
+
+        view.write({'mode': 'primary'})
+        view.write({'groups_id': [1]})
+
+        with self.assertRaises(ValidationError):
+            view.write({'mode': 'extension'})
 
 class ViewModeField(ViewCase):
     """
@@ -3921,7 +4035,7 @@ class TestValidationTools(common.BaseCase):
             {'x', 'y', 'z'},
         )
 
-class TestAccessRights(common.TransactionCase):
+class TestAccessRights(TransactionCaseWithUserDemo):
 
     @common.users('demo')
     def test_access(self):
@@ -3947,7 +4061,7 @@ class TestAllViews(common.TransactionCase):
                 view._check_xml()
 
 @common.tagged('post_install', '-at_install', '-standard', 'render_all_views')
-class TestRenderAllViews(common.TransactionCase):
+class TestRenderAllViews(TransactionCaseWithUserDemo):
 
     @common.users('demo', 'admin')
     def test_render_all_views(self):

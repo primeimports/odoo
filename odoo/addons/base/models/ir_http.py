@@ -18,13 +18,18 @@ import werkzeug.exceptions
 import werkzeug.routing
 import werkzeug.utils
 
+try:
+    from werkzeug.routing import NumberConverter
+except ImportError:
+    from werkzeug.routing.converters import NumberConverter  # moved in werkzeug 2.2.2
+
 import odoo
 from odoo import api, http, models, tools, SUPERUSER_ID
 from odoo.exceptions import AccessDenied, AccessError, MissingError
 from odoo.http import request, Response, ROUTING_KEYS, Stream
 from odoo.modules.registry import Registry
 from odoo.service import security
-from odoo.tools import consteq, submap
+from odoo.tools import get_lang, submap
 from odoo.tools.translate import code_translations
 from odoo.modules.module import get_resource_path, get_module_path
 
@@ -69,7 +74,7 @@ class ModelsConverter(werkzeug.routing.BaseConverter):
         return ",".join(value.ids)
 
 
-class SignedIntConverter(werkzeug.routing.NumberConverter):
+class SignedIntConverter(NumberConverter):
     regex = r'-?\d+'
     num_convert = int
 
@@ -139,6 +144,11 @@ class IrHttp(models.AbstractModel):
             if isinstance(val, models.BaseModel) and isinstance(val._uid, RequestUID):
                 args[key] = val.with_user(request.env.uid)
 
+        # verify the default language set in the context is valid,
+        # otherwise fallback on the company lang, english or the first
+        # lang installed
+        request.update_context(lang=get_lang(request.env)._get_cached('code'))
+
     @classmethod
     def _dispatch(cls, endpoint):
         result = endpoint(**request.params)
@@ -158,7 +168,7 @@ class IrHttp(models.AbstractModel):
     def _serve_fallback(cls):
         model = request.env['ir.attachment']
         attach = model.sudo()._get_serve_attachment(request.httprequest.path)
-        if attach:
+        if attach and (attach.store_fname or attach.db_datas):
             return Stream.from_attachment(attach).get_response()
 
     @classmethod
@@ -180,8 +190,6 @@ class IrHttp(models.AbstractModel):
             _logger.info("Generating routing map for key %s" % str(key))
             registry = Registry(threading.current_thread().dbname)
             installed = registry._init_modules.union(odoo.conf.server_wide_modules)
-            if tools.config['test_enable'] and odoo.modules.module.current_test:
-                installed.add(odoo.modules.module.current_test)
             mods = sorted(installed)
             # Note : when routing map is generated, we put it on the class `cls`
             # to make it available for all instance. Since `env` create an new instance
@@ -191,7 +199,7 @@ class IrHttp(models.AbstractModel):
             for url, endpoint in cls._generate_routing_rules(mods, converters=cls._get_converters()):
                 routing = submap(endpoint.routing, ROUTING_KEYS)
                 if routing['methods'] is not None and 'OPTIONS' not in routing['methods']:
-                    routing['methods'] = routing['methods'] + ['OPTIONS']
+                    routing['methods'] = [*routing['methods'], 'OPTIONS']
                 rule = werkzeug.routing.Rule(url, endpoint=endpoint, **routing)
                 rule.merge_slashes = False
                 routing_map.add(rule)
@@ -206,7 +214,11 @@ class IrHttp(models.AbstractModel):
 
     @api.autovacuum
     def _gc_sessions(self):
-        http.root.session_store.vacuum()
+        if os.getenv("ODOO_SKIP_GC_SESSIONS"):
+            return
+        ICP = self.env["ir.config_parameter"]
+        max_lifetime = int(ICP.get_param('sessions.max_inactivity_seconds', http.SESSION_LIFETIME))
+        http.root.session_store.vacuum(max_lifetime=max_lifetime)
 
     @api.model
     def get_translations_for_webclient(self, modules, lang):
@@ -229,6 +241,8 @@ class IrHttp(models.AbstractModel):
             }
             lang_params['week_start'] = int(lang_params['week_start'])
             lang_params['code'] = lang
+            if lang_params["thousands_sep"]:
+                lang_params["thousands_sep"] = lang_params["thousands_sep"].replace(' ', '\N{NO-BREAK SPACE}')
 
         # Regional languages (ll_CC) must inherit/override their parent lang (ll), but this is
         # done server-side when the language is loaded, so we only need to load the user's lang.
@@ -252,4 +266,8 @@ class IrHttp(models.AbstractModel):
 
     @classmethod
     def _is_allowed_cookie(cls, cookie_type):
+        return True
+
+    @api.model
+    def _verify_request_recaptcha_token(self, action):
         return True

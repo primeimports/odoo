@@ -11,6 +11,7 @@ import werkzeug
 
 from odoo import http
 from odoo.http import request
+from werkzeug.exceptions import NotFound
 
 _logger = logging.getLogger(__name__)
 
@@ -52,6 +53,12 @@ class Authenticate(http.Controller):
         updated_redirect = parsed_redirect.replace(query=werkzeug.urls.url_encode(params))
         return request.redirect(updated_redirect.to_url(), local=False)
 
+    @http.route(['/mail_plugin/auth/check_version'], type='json', auth="none", cors="*",
+                methods=['POST', 'OPTIONS'])
+    def auth_check_version(self):
+        """Allow to know if the module is installed and which addin version is supported."""
+        return 1
+
     # In this case, an exception will be thrown in case of preflight request if only POST is allowed.
     @http.route(['/mail_client_extension/auth/access_token', '/mail_plugin/auth/access_token'], type='json', auth="none", cors="*",
                 methods=['POST', 'OPTIONS'])
@@ -92,6 +99,8 @@ class Authenticate(http.Controller):
     # Using UTC explicitly in case of a distributed system where the generation and the signature verification do not
     # necessarily happen on the same server
     def _generate_auth_code(self, scope, name):
+        if not request.env.user._is_internal():
+            raise NotFound()
         auth_dict = {
             'scope': scope,
             'name': name,

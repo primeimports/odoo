@@ -2,6 +2,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from datetime import timedelta
+from itertools import chain, starmap, zip_longest
 
 from odoo import SUPERUSER_ID, api, fields, models, _
 from odoo.exceptions import ValidationError
@@ -34,6 +35,9 @@ class SaleOrder(models.Model):
         for order in self:
             company_template = order.company_id.sale_order_template_id
             if company_template and order.sale_order_template_id != company_template:
+                if 'website_id' in self._fields and order.website_id:
+                    # don't apply quotation template for order created via eCommerce
+                    continue
                 order.sale_order_template_id = order.company_id.sale_order_template_id.id
 
     @api.depends('partner_id', 'sale_order_template_id')
@@ -89,6 +93,9 @@ class SaleOrder(models.Model):
 
     @api.onchange('sale_order_template_id')
     def _onchange_sale_order_template_id(self):
+        if not self.sale_order_template_id:
+            return
+
         sale_order_template = self.sale_order_template_id.with_context(lang=self.partner_id.lang)
 
         order_lines_data = [fields.Command.clear()]
@@ -96,6 +103,11 @@ class SaleOrder(models.Model):
             fields.Command.create(line._prepare_order_line_values())
             for line in sale_order_template.sale_order_template_line_ids
         ]
+
+        # set first line to sequence -99, so a resequence on first page doesn't cause following page
+        # lines (that all have sequence 10 by default) to get mixed in the first page
+        if len(order_lines_data) >= 2:
+            order_lines_data[1][2]['sequence'] = -99
 
         self.order_line = order_lines_data
 
@@ -106,6 +118,37 @@ class SaleOrder(models.Model):
         ]
 
         self.sale_order_option_ids = option_lines_data
+
+    @api.onchange('partner_id')
+    def _onchange_partner_id(self):
+        """Reload template for unsaved orders with unmodified lines & orders."""
+        if self._origin or not self.sale_order_template_id:
+            return
+
+        def line_eqv(line, t_line):
+            return line and t_line and (
+                line.product_id == t_line.product_id
+                and line.display_type == t_line.display_type
+                and line.product_uom == t_line.product_uom_id
+                and line.product_uom_qty == t_line.product_uom_qty
+            )
+
+        def option_eqv(option, t_option):
+            return option and t_option and all(
+                option[fname] == t_option[fname]
+                for fname in ['product_id', 'uom_id', 'quantity']
+            )
+
+        lines = self.order_line
+        options = self.sale_order_option_ids
+        t_lines = self.sale_order_template_id.sale_order_template_line_ids
+        t_options = self.sale_order_template_id.sale_order_template_option_ids
+
+        if all(chain(
+            starmap(line_eqv, zip_longest(lines, t_lines)),
+            starmap(option_eqv, zip_longest(options, t_options)),
+        )):
+            self._onchange_sale_order_template_id()
 
     #=== ACTION METHODS ===#
 

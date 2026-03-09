@@ -3,7 +3,7 @@
 # 	* account_payment
 # 
 # Translators:
-# AncesLatino2004, 2022
+# 7b9408628f00af852f513eb4f12c005b_f9c6891, 2022
 # Martin Trigaux, 2022
 # Carles Antoli <carlesantoli@hotmail.com>, 2022
 # Manel Fernandez Ramirez <manelfera@outlook.com>, 2022
@@ -11,20 +11,22 @@
 # Denys Sarapulov, 2022
 # Josep Anton Belchi, 2022
 # Arnau Ros, 2022
-# Quim - eccit <quim@eccit.com>, 2022
+# Quim - coopdevs <quim.rebull@coopdevs.org>, 2022
 # RGB Consulting <odoo@rgbconsulting.com>, 2022
 # Guspy12, 2022
 # CristianCruzParra, 2022
-# Ivan Espinola, 2022
+# Ivan Espinola, 2023
+# Óscar Fonseca <tecnico@pyming.com>, 2023
+# Noemi Pla, 2025
 # 
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server 16.0+e\n"
+"Project-Id-Version: Odoo Server 16.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2022-12-15 12:49+0000\n"
+"POT-Creation-Date: 2024-02-06 13:31+0000\n"
 "PO-Revision-Date: 2022-09-22 05:44+0000\n"
-"Last-Translator: Ivan Espinola, 2022\n"
-"Language-Team: Catalan (https://www.transifex.com/odoo/teams/41243/ca/)\n"
+"Last-Translator: Noemi Pla, 2025\n"
+"Language-Team: Catalan (https://app.transifex.com/odoo/teams/41243/ca/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
@@ -141,7 +143,7 @@ msgid ""
 "                        Wait a moment for it to be processed. If the refund is still pending in a\n"
 "                        few minutes, please check your payment provider configuration."
 msgstr ""
-"<strong>Avís!</strong> Hi ha un reemborsament pendent per aquest pagament.\n"
+"<strong>Avís!</strong> Hi ha un abonament pendent per aquest pagament.\n"
 "                        Espereu un moment perquè es processi. Si l'abonament encara està pendent en uns\n"
 "                        pocs minuts, comproveu la configuració del vostre proveïdor de pagaments."
 
@@ -307,7 +309,7 @@ msgstr "Última actualització el"
 #. module: account_payment
 #: model:ir.model.fields,field_description:account_payment.field_payment_refund_wizard__amount_available_for_refund
 msgid "Maximum Refund Allowed"
-msgstr "Abonament màxim permes"
+msgstr "Abonament màxim permès"
 
 #. module: account_payment
 #: model:ir.model.fields,help:account_payment.field_account_payment__payment_token_id
@@ -424,7 +426,7 @@ msgstr "Proveïdor"
 #: model_terms:ir.ui.view,arch_db:account_payment.view_account_payment_form_inherit_payment
 #, python-format
 msgid "Refund"
-msgstr "Factura rectificativa (abonament)"
+msgstr "Abonament"
 
 #. module: account_payment
 #: model:ir.model.fields,field_description:account_payment.field_payment_refund_wizard__amount_to_refund
@@ -524,7 +526,7 @@ msgstr "Els paràmetres proporcionats no són vàlids"
 #. module: account_payment
 #: model:ir.model.fields,help:account_payment.field_account_payment__source_payment_id
 msgid "The source payment of related refund payments"
-msgstr "El pagament d'origen dels abonaments de reemborsament relacionats"
+msgstr "El pagament d'origen dels abonaments relacionats"
 
 #. module: account_payment
 #: model_terms:ir.ui.view,arch_db:account_payment.portal_invoice_error
@@ -552,6 +554,15 @@ msgstr ""
 "Ha sorgit un error processant el pagament: ID de targeta de crèdit no vàlid"
 
 #. module: account_payment
+#. odoo-python
+#: code:addons/account_payment/models/payment_provider.py:0
+#, python-format
+msgid ""
+"To uninstall this module, please remove first the corresponding payment "
+"method line in the incoming payments tab defined on the bank journal."
+msgstr ""
+
+#. module: account_payment
 #: model:ir.model.fields,field_description:account_payment.field_account_bank_statement_line__transaction_ids
 #: model:ir.model.fields,field_description:account_payment.field_account_move__transaction_ids
 #: model:ir.model.fields,field_description:account_payment.field_account_payment__transaction_ids
@@ -576,11 +587,22 @@ msgstr "Transacció buida"
 
 #. module: account_payment
 #. odoo-python
-#: code:addons/account_payment/models/account_journal.py:0
+#: code:addons/account_payment/models/account_payment_method_line.py:0
 #, python-format
 msgid ""
 "You can't delete a payment method that is linked to a provider in the enabled or test state.\n"
-"Linked provider(s): %s"
+"Linked providers(s): %s"
 msgstr ""
-"No podeu suprimir un mètode de pagament que estigui enllaçat a un proveïdor en l'estat habilitat o de prova.\n"
-"Proveïdor(s) enllaçats: %s"
+"No és possible eliminar un mètode de pagament que estigui vinculat a un proveïdor en l'estat habilitat o de prova.\n"
+"Proveïdor(s) vinculat(s): %s"
+
+#. module: account_payment
+#. odoo-python
+#: code:addons/account_payment/models/account_journal.py:0
+#, python-format
+msgid ""
+"You must first deactivate a payment provider before deleting its journal.\n"
+"Linked providers: %s"
+msgstr ""
+"Primer heu de desactivar un proveïdor de pagaments abans d'eliminar el seu diari.\n"
+"Proveïdors enllaçats: %s"

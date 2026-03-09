@@ -77,7 +77,7 @@ var PrinterMixin = {
             // IoT box can't find a printer.
             if (!sendPrintResult || sendPrintResult.result === false) {
                 this.receipt_queue.length = 0;
-                return this.printResultGenerator.IoTResultError();
+                return this.printResultGenerator.IoTResultError(sendPrintResult.printerErrorCode);
             }
         }
         return this.printResultGenerator.Successful();
@@ -98,6 +98,9 @@ var PrinterMixin = {
     htmlToImg: function (receipt) {
         $('.pos-receipt-print').html(receipt);
         this.receipt = $('.pos-receipt-print>.pos-receipt');
+        if (this.isEmail) {
+            $('.pos-receipt-print .pos-receipt').css({ 'padding': '15px', 'padding-bottom': '30px'})
+        }
         // Odoo RTL support automatically flip left into right but html2canvas
         // won't work as expected if the receipt is aligned to the right of the
         // screen so we need to flip it back.

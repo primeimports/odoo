@@ -9,10 +9,11 @@ from functools import partial
 from psycopg2 import IntegrityError, OperationalError, errorcodes
 
 import odoo
-from odoo.exceptions import UserError, ValidationError
+from odoo.exceptions import UserError, ValidationError, AccessError
+from odoo.models import BaseModel
 from odoo.http import request
-from odoo.models import check_method_name
 from odoo.tools import DotDict
+from odoo.tools.safe_eval import _UNSAFE_ATTRIBUTES
 from odoo.tools.translate import _, translate_sql_constraint
 from . import security
 from ..tools import lazy
@@ -22,6 +23,25 @@ _logger = logging.getLogger(__name__)
 PG_CONCURRENCY_ERRORS_TO_RETRY = (errorcodes.LOCK_NOT_AVAILABLE, errorcodes.SERIALIZATION_FAILURE, errorcodes.DEADLOCK_DETECTED)
 MAX_TRIES_ON_CONCURRENCY_FAILURE = 5
 
+
+def get_public_method(model, name):
+    """ Get the public unbound method from a model.
+    When the method does not exist or is inaccessible, raise appropriate errors.
+    Accessible methods are public (in sense that python defined it:
+    not prefixed with "_") and are not decorated with `@api.private`.
+    """
+    assert isinstance(model, BaseModel), f"{model!r} is not a BaseModel for {name}"
+    cls = type(model)
+    method = getattr(cls, name, None)
+    if not callable(method):
+        raise AttributeError(f"The method '{model._name}.{name}' does not exist")  # noqa: TRY004
+    for mro_cls in cls.mro():
+        cla_method = getattr(mro_cls, name, None)
+        if not cla_method:
+            continue
+        if name.startswith('_') or getattr(cla_method, '_api_private', False) or name in _UNSAFE_ATTRIBUTES:
+            raise AccessError(f"Private methods (such as '{model._name}.{name}') cannot be called remotely.")
+    return method
 
 def dispatch(method, params):
     db, uid, passwd = params[0], int(params[1]), params[2]
@@ -47,6 +67,7 @@ def execute_cr(cr, uid, obj, method, *args, **kw):
     recs = env.get(obj)
     if recs is None:
         raise UserError(_("Object %s doesn't exist", obj))
+    get_public_method(recs, method)  # Don't use the result, call_kw will redo the getattr
     result = retrying(partial(odoo.api.call_kw, recs, method, args, kw), env)
     # force evaluation of lazy values before the cursor is closed, as it would
     # error afterwards if the lazy isn't already evaluated (and cached)
@@ -61,7 +82,6 @@ def execute_kw(db, uid, obj, method, args, kw=None):
 
 def execute(db, uid, obj, method, *args, **kw):
     with odoo.registry(db).cursor() as cr:
-        check_method_name(method)
         res = execute_cr(cr, uid, obj, method, *args, **kw)
         if res is None:
             _logger.info('The method %s of the object %s can not return `None` !', method, obj)
@@ -72,14 +92,13 @@ def _as_validation_error(env, exc):
     """ Return the IntegrityError encapsuled in a nice ValidationError """
 
     unknown = _('Unknown')
+    model = DotDict({'_name': unknown.lower(), '_description': unknown})
+    field = DotDict({'name': unknown.lower(), 'string': unknown})
     for _name, rclass in env.registry.items():
         if exc.diag.table_name == rclass._table:
             model = rclass
-            field = model._fields.get(exc.diag.column_name)
+            field = model._fields.get(exc.diag.column_name) or field
             break
-    else:
-        model = DotDict({'_name': unknown.lower(), '_description': unknown})
-        field = DotDict({'name': unknown.lower(), 'string': unknown})
 
     if exc.pgcode == errorcodes.NOT_NULL_VIOLATION:
         return ValidationError(_(
@@ -109,7 +128,7 @@ def _as_validation_error(env, exc):
     if exc.diag.constraint_name in env.registry._sql_constraints:
         return ValidationError(_(
             "The operation cannot be completed: %s",
-            translate_sql_constraint(env.cr, exc.diag.constraint_name, env.context['lang'])
+            translate_sql_constraint(env.cr, exc.diag.constraint_name, env.context.get('lang', 'en_US'))
         ))
 
     return ValidationError(_("The operation cannot be completed: %s", exc.args[0]))
@@ -139,9 +158,16 @@ def retrying(func, env):
                 if env.cr._closed:
                     raise
                 env.cr.rollback()
+                env.reset()
                 env.registry.reset_changes()
                 if request:
                     request.session = request._get_session_and_dbname()[0]
+                    # Rewind files in case of failure
+                    for filename, file in request.httprequest.files.items():
+                        if hasattr(file, "seekable") and file.seekable():
+                            file.seek(0)
+                        else:
+                            raise RuntimeError(f"Cannot retry request on input file {filename!r} after serialization failure") from exc
                 if isinstance(exc, IntegrityError):
                     raise _as_validation_error(env, exc) from exc
                 if exc.pgcode not in PG_CONCURRENCY_ERRORS_TO_RETRY:
@@ -158,6 +184,7 @@ def retrying(func, env):
             raise RuntimeError("unreachable")
 
     except Exception:
+        env.reset()
         env.registry.reset_changes()
         raise
 

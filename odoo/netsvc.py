@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 import contextlib
+import json
 import logging
 import logging.handlers
 import os
@@ -12,9 +13,12 @@ import time
 import traceback
 import warnings
 
+import werkzeug.serving
+
 from . import release
 from . import sql_db
 from . import tools
+from .modules import module
 
 _logger = logging.getLogger(__name__)
 
@@ -25,10 +29,30 @@ def log(logger, level, prefix, msg, depth=None):
         logger.log(level, indent+line)
         indent=indent_after
 
+
+class WatchedFileHandler(logging.handlers.WatchedFileHandler):
+    def __init__(self, filename):
+        self.errors = None  # py38
+        super().__init__(filename)
+        # Unfix bpo-26789, in case the fix is present
+        self._builtin_open = None
+
+    def _open(self):
+        return open(self.baseFilename, self.mode, encoding=self.encoding, errors=self.errors)
+
 class PostgreSQLHandler(logging.Handler):
     """ PostgreSQL Logging Handler will store logs in the database, by default
     the current database, can be set using --log-db=DBNAME
     """
+
+    def __init__(self):
+        super().__init__()
+        self._support_metadata = False
+        if tools.config['log_db'] != '%d':
+            with contextlib.suppress(Exception), tools.mute_logger('odoo.sql_db'), sql_db.db_connect(tools.config['log_db'], allow_uri=True).cursor() as cr:
+                cr.execute("""SELECT 1 FROM information_schema.columns WHERE table_name='ir_logging' and column_name='metadata'""")
+                self._support_metadata = bool(cr.fetchone())
+
     def emit(self, record):
         ct = threading.current_thread()
         ct_db = getattr(ct, 'dbname', None)
@@ -48,7 +72,24 @@ class PostgreSQLHandler(logging.Handler):
             levelname = logging.getLevelName(record.levelno)
 
             val = ('server', ct_db, record.name, levelname, msg, record.pathname, record.lineno, record.funcName)
-            cr.execute("""
+
+            if self._support_metadata:
+                metadata = {}
+                if module.current_test:
+                    try:
+                        metadata['test'] = module.current_test.get_log_metadata()
+                    except:
+                        pass
+
+                if metadata:
+                    val = (*val, json.dumps(metadata))
+                    cr.execute(f"""
+                        INSERT INTO ir_logging(create_date, type, dbname, name, level, message, path, line, func, metadata)
+                        VALUES (NOW() at time zone 'UTC', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, val)
+                    return
+
+            cr.execute(f"""
                 INSERT INTO ir_logging(create_date, type, dbname, name, level, message, path, line, func)
                 VALUES (NOW() at time zone 'UTC', %s, %s, %s, %s, %s, %s, %s, %s)
             """, val)
@@ -104,6 +145,16 @@ class DBFormatter(logging.Formatter):
         record.dbname = getattr(threading.current_thread(), 'dbname', '?')
         return logging.Formatter.format(self, record)
 
+    def formatMessage(self, record):
+        if record.munge_traceback:
+            return super().formatMessage(record).replace(
+                'Traceback (most recent call last):',
+                '_Traceback_ (most recent call last):',
+            )
+        else:
+            return super().formatMessage(record)
+
+
 class ColoredFormatter(DBFormatter):
     def format(self, record):
         fg_color, bg_color = LEVEL_COLOR_MAPPING.get(record.levelno, (GREEN, DEFAULT))
@@ -121,16 +172,25 @@ def init_logger():
     def record_factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
         record.perf_info = ""
+        record.munge_traceback = False
         return record
     logging.setLogRecordFactory(record_factory)
 
     # enable deprecation warnings (disabled by default)
     warnings.simplefilter('default', category=DeprecationWarning)
-    # ignore deprecation warnings from invalid escape (there's a ton and it's
-    # pretty likely a super low-value signal)
-    warnings.filterwarnings('ignore', r'^invalid escape sequence \'?\\.', category=DeprecationWarning)
-    # recordsets are both sequence and set so trigger warning despite no issue
-    warnings.filterwarnings('ignore', r'^Sampling from a set', category=DeprecationWarning, module='odoo')
+    if sys.version_info[:2] == (3, 9):
+        # recordsets are both sequence and set so trigger warning despite no issue
+        # Only applies to 3.9 as it was fixed in 3.10 see https://bugs.python.org/issue42470
+        warnings.filterwarnings('ignore', r'^Sampling from a set', category=DeprecationWarning, module='odoo')
+    # https://github.com/urllib3/urllib3/issues/2680
+    warnings.filterwarnings('ignore', r'^\'urllib3.contrib.pyopenssl\' module is deprecated.+', category=DeprecationWarning)
+    # ofxparse use an html parser to parse ofx xml files and triggers a warning since bs4 4.11.0
+    # https://github.com/jseutter/ofxparse/issues/170
+    try:
+        from bs4 import XMLParsedAsHTMLWarning
+        warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
+    except ImportError:
+        pass
     # ignore a bunch of warnings we can't really fix ourselves
     for module in [
         'babel.util', # deprecated parser module, no release yet
@@ -143,11 +203,22 @@ def init_logger():
     ]:
         warnings.filterwarnings('ignore', category=DeprecationWarning, module=module)
 
+    # reportlab<4.0.6 triggers this in Py3.10/3.11
+    warnings.filterwarnings('ignore', r'the load_module\(\) method is deprecated', category=DeprecationWarning, module='importlib._bootstrap')
     # the SVG guesser thing always compares str and bytes, ignore it
     warnings.filterwarnings('ignore', category=BytesWarning, module='odoo.tools.image')
     # reportlab does a bunch of bytes/str mixing in a hashmap
     warnings.filterwarnings('ignore', category=BytesWarning, module='reportlab.platypus.paraparser')
+    # difficult to fix in 3.7, will be fixed in 16.0 with python 3.8+
+    warnings.filterwarnings('ignore', r'^Attribute .* is deprecated and will be removed in Python 3.14; use .* instead', category=DeprecationWarning)
+    warnings.filterwarnings('ignore', r'^.* is deprecated and will be removed in Python 3.14; use .* instead', category=DeprecationWarning)
 
+    # need to be adapted later but too muchwork for this pr.
+    warnings.filterwarnings('ignore', r'^datetime.datetime.utcnow\(\) is deprecated and scheduled for removal in a future version.*', category=DeprecationWarning)
+
+    # This warning is triggered library only during the python precompilation which does not occur on readonly filesystem
+    warnings.filterwarnings("ignore", r'invalid escape sequence', category=DeprecationWarning, module=".*vobject")
+    warnings.filterwarnings("ignore", r'invalid escape sequence', category=SyntaxWarning, module=".*vobject")
     from .tools.translate import resetlocale
     resetlocale()
 
@@ -176,7 +247,7 @@ def init_logger():
             if dirname and not os.path.isdir(dirname):
                 os.makedirs(dirname)
             if os.name == 'posix':
-                handler = logging.handlers.WatchedFileHandler(logf)
+                handler = WatchedFileHandler(logf)
             else:
                 handler = logging.FileHandler(logf)
         except Exception:
@@ -195,6 +266,7 @@ def init_logger():
     else:
         formatter = DBFormatter(format)
         perf_filter = PerfFilter()
+        werkzeug.serving._log_add_style = False
     handler.setFormatter(formatter)
     logging.getLogger().addHandler(handler)
     logging.getLogger('werkzeug').addFilter(perf_filter)

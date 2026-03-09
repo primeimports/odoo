@@ -662,6 +662,7 @@ class TestQWebNS(TransactionCase):
             """
         })
 
+        error_msg = ''
         try:
             "" + 0
         except TypeError as e:
@@ -702,6 +703,11 @@ class TestQWebBasic(TransactionCase):
             ("['test_' + x for x in ['a', 'b']]",       {},                             ['test_a', 'test_b']),
             ("""1 and 2 and 0
                 or 9""",                                {},                             9),
+            ('[x for x in (1,2)]',                      {},                             [1, 2]),  # LOAD_FAST_AND_CLEAR
+            ('list(x for x in (1,2))',                  {},                             [1, 2]),  # END_FOR, CALL_INTRINSIC_1
+            ('v if v is None else w',                   {'v': False, 'w': 'foo'},       'foo'),  # POP_JUMP_IF_NONE
+            ('v if v is not None else w',               {'v': None, 'w': 'foo'},        'foo'),  # POP_JUMP_IF_NOT_NONE
+            ('{a for a in (1, 2)}',                     {},                             {1, 2}),  # RERAISE
         ]
 
         IrQweb = self.env['ir.qweb']
@@ -709,7 +715,7 @@ class TestQWebBasic(TransactionCase):
             expr_namespace = IrQweb._compile_expr(expr)
 
             compiled = compile("""def test(values):\n  values['result'] = %s""" % expr_namespace, '<test>', 'exec')
-            globals_dict = IrQweb._prepare_globals()
+            globals_dict = IrQweb._IrQWeb__prepare_globals()
             values = {}
             unsafe_eval(compiled, globals_dict, values)
             test = values['test']
@@ -1279,6 +1285,92 @@ class TestQWebBasic(TransactionCase):
                 <div>123</div>
             """
         rendered = self.env['ir.qweb']._render(t.id)
+        self.assertEqual(rendered.strip(), result.strip())
+
+    def test_if_spaces(self):
+        t = self.env['ir.ui.view'].create({
+            'name': 'test',
+            'type': 'qweb',
+            'arch_db': '''<t t-name="test">
+                <div>
+                    0
+                    <t>1</t>
+                    <t t-if="True">2</t>
+                    <t>3</t>
+                    4
+                    <t>5</t>
+                    6
+                    <t t-if="True">7</t>
+                    8
+                    <t t-if="False">9</t>
+                    10
+                    <t t-if="False">11</t>
+                    <t t-else="">12</t>
+                    13
+                </div>
+            </t>'''
+        })
+        result = """
+                <div>
+                    0
+                    1
+                    2
+                    3
+                    4
+                    5
+                    6
+                    7
+                    8
+                    10
+                    12
+                    13
+                </div>
+            """
+        rendered = str(self.env['ir.qweb']._render(t.id))
+        self.assertEqual(rendered.strip(), result.strip())
+
+    def test_if_comment(self):
+        t = self.env['ir.ui.view'].create({
+            'name': 'test',
+            'type': 'qweb',
+            'arch_db': '''<t t-name="test">
+                <div>
+                    <!-- comment 0 -->
+                    0
+                    <div>1</div>
+                    <!-- comment 1 -->
+                    <div t-if="True">2 (t-if)</div>
+                    <!-- comment 2 -->
+                    <div t-else="">3 (t-else)</div>
+                    <!-- comment 3 -->
+                    <div>4</div>
+                    <!-- comment 4 -->
+                    <div t-if="False">5 (t-if)</div>
+                    <!-- comment 5 -->
+                    <div t-else="">6 (t-else)</div>
+                    <!-- comment 6 -->
+                    <div>7</div>
+                </div>
+            </t>'''
+        })
+        result = """
+                <div>
+                    
+                    0
+                    <div>1</div>
+                    
+                    <div>2 (t-if)</div>
+                    
+                    
+                    <div>4</div>
+                    
+                    <div>6 (t-else)</div>
+                    
+                    
+                    <div>7</div>
+                </div>
+            """
+        rendered = str(self.env['ir.qweb']._render(t.id))
         self.assertEqual(rendered.strip(), result.strip())
 
     def test_error_message_1(self):

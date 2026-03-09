@@ -18,7 +18,7 @@ class WebSocketMock extends EventTarget {
         });
     }
 
-    close(code, reason) {
+    close(code = 1000, reason) {
         this.readyState = 3;
         const closeEv = new CloseEvent('close', {
             code,
@@ -55,6 +55,13 @@ class SharedWorkerMock extends EventTarget {
     }
   }
 
+class WorkerMock extends SharedWorkerMock {
+    constructor(websocketWorker) {
+        super(websocketWorker);
+        this.port.start();
+        this.postMessage = this.port.postMessage.bind(this.port);
+    }
+}
 
 let websocketWorker;
 /**
@@ -79,6 +86,14 @@ export function patchWebsocketWorkerWithCleanup(params = {}) {
                 sharedWorker._messageChannel.port2.close();
             });
             return sharedWorker;
+        },
+        Worker: function () {
+            const worker = new WorkerMock(websocketWorker);
+            registerCleanup(() => {
+                worker._messageChannel.port1.close();
+                worker._messageChannel.port2.close();
+            });
+            return worker;
         },
     }, { pure: true });
     registerCleanup(() => {

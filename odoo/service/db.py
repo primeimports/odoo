@@ -11,6 +11,7 @@ import traceback
 from xml.etree import ElementTree as ET
 import zipfile
 
+from datetime import datetime
 from psycopg2 import sql
 from pytz import country_timezones
 from functools import wraps
@@ -96,6 +97,30 @@ def _initialize_db(id, db_name, demo, lang, user_password, login='admin', countr
     except Exception as e:
         _logger.exception('CREATE DATABASE failed:')
 
+
+def _check_faketime_mode(db_name):
+    if os.getenv('ODOO_FAKETIME_TEST_MODE') and db_name in odoo.tools.config['db_name'].split(','):
+        try:
+            db = odoo.sql_db.db_connect(db_name)
+            with db.cursor() as cursor:
+                cursor.execute("SELECT (pg_catalog.now() AT TIME ZONE 'UTC');")
+                server_now = cursor.fetchone()[0]
+                time_offset = (datetime.now() - server_now).total_seconds()
+
+                cursor.execute("""
+                    CREATE OR REPLACE FUNCTION public.now()
+                        RETURNS timestamp with time zone AS $$
+                            SELECT pg_catalog.now() +  %s * interval '1 second';
+                        $$ LANGUAGE sql;
+                """, (int(time_offset), ))
+                cursor.execute("SELECT (now() AT TIME ZONE 'UTC');")
+                new_now = cursor.fetchone()[0]
+                _logger.info("Faketime mode, new cursor now is %s", new_now)
+                cursor.commit()
+        except psycopg2.Error as e:
+            _logger.warning("Unable to set fakedtimed NOW() : %s", e)
+
+
 def _create_empty_database(name):
     db = odoo.sql_db.db_connect('postgres')
     with closing(db.cursor()) as cr:
@@ -103,6 +128,7 @@ def _create_empty_database(name):
         cr.execute("SELECT datname FROM pg_database WHERE datname = %s",
                    (name,), log_exceptions=False)
         if cr.fetchall():
+            _check_faketime_mode(name)
             raise DatabaseExists("database %r already exists!" % (name,))
         else:
             # database-altering operations cannot be executed inside a transaction
@@ -132,6 +158,8 @@ def _create_empty_database(name):
                 cr.execute("ALTER FUNCTION unaccent(text) IMMUTABLE")
     except psycopg2.Error as e:
         _logger.warning("Unable to create PostgreSQL extensions : %s", e)
+    _check_faketime_mode(name)
+
 
 @check_db_management_enabled
 def exp_create_database(db_name, demo, lang, user_password='admin', login='admin', country_code=None, phone=None):
@@ -142,7 +170,7 @@ def exp_create_database(db_name, demo, lang, user_password='admin', login='admin
     return True
 
 @check_db_management_enabled
-def exp_duplicate_database(db_original_name, db_name):
+def exp_duplicate_database(db_original_name, db_name, neutralize_database=False):
     _logger.info('Duplicate database `%s` to `%s`.', db_original_name, db_name)
     odoo.sql_db.close_db(db_original_name)
     db = odoo.sql_db.db_connect('postgres')
@@ -160,6 +188,8 @@ def exp_duplicate_database(db_original_name, db_name):
         # if it's a copy of a database, force generation of a new dbuuid
         env = odoo.api.Environment(cr, SUPERUSER_ID, {})
         env['ir.config_parameter'].init(force=True)
+        if neutralize_database:
+            odoo.modules.neutralize.neutralize_database(cr)
 
     from_fs = odoo.tools.config.filestore(db_original_name)
     to_fs = odoo.tools.config.filestore(db_name)
@@ -284,7 +314,7 @@ def exp_restore(db_name, data, copy=False):
     return True
 
 @check_db_management_enabled
-def restore_db(db, dump_file, copy=False):
+def restore_db(db, dump_file, copy=False, neutralize_database=False):
     assert isinstance(db, str)
     if exp_db_exist(db):
         _logger.warning('RESTORE DB: %s already exists', db)
@@ -328,6 +358,9 @@ def restore_db(db, dump_file, copy=False):
             if copy:
                 # if it's a copy of a database, force generation of a new dbuuid
                 env['ir.config_parameter'].init(force=True)
+            if neutralize_database:
+                odoo.modules.neutralize.neutralize_database(cr)
+
             if filestore_path:
                 filestore_dest = env['ir.attachment']._filestore()
                 shutil.move(filestore_path, filestore_dest)

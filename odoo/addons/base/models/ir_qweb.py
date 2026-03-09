@@ -359,6 +359,7 @@ structure.
 
 """
 
+import contextlib
 import fnmatch
 import io
 import logging
@@ -406,13 +407,36 @@ _SAFE_QWEB_OPCODES = _EXPR_OPCODES.union(to_opcodes([
     'CALL_METHOD', 'LOAD_METHOD',
 
     'GET_ITER', 'FOR_ITER', 'YIELD_VALUE',
-    'JUMP_FORWARD', 'JUMP_ABSOLUTE',
+    'JUMP_FORWARD', 'JUMP_ABSOLUTE', 'JUMP_BACKWARD',
     'JUMP_IF_FALSE_OR_POP', 'JUMP_IF_TRUE_OR_POP', 'POP_JUMP_IF_FALSE', 'POP_JUMP_IF_TRUE',
 
     'LOAD_NAME', 'LOAD_ATTR',
     'LOAD_FAST', 'STORE_FAST', 'UNPACK_SEQUENCE',
     'STORE_SUBSCR',
     'LOAD_GLOBAL',
+    # Following opcodes were added in 3.11 https://docs.python.org/3/whatsnew/3.11.html#new-opcodes
+    'RESUME',
+    'CALL',
+    'PRECALL',
+    'POP_JUMP_FORWARD_IF_FALSE',
+    'PUSH_NULL',
+    'POP_JUMP_FORWARD_IF_TRUE', 'KW_NAMES',
+    'FORMAT_VALUE', 'BUILD_STRING',
+    'RETURN_GENERATOR',
+    'POP_JUMP_BACKWARD_IF_FALSE',
+    'SWAP',
+    # 3.12 https://docs.python.org/3/whatsnew/3.12.html#new-opcodes
+    'END_FOR',
+    'LOAD_FAST_AND_CLEAR',
+    'POP_JUMP_IF_NOT_NONE', 'POP_JUMP_IF_NONE',
+    'RERAISE',
+    'CALL_INTRINSIC_1',
+    'STORE_SLICE',
+    # 3.13
+    'CALL_KW', 'LOAD_FAST_LOAD_FAST',
+    'STORE_FAST_STORE_FAST', 'STORE_FAST_LOAD_FAST',
+    'CONVERT_VALUE', 'FORMAT_SIMPLE', 'FORMAT_WITH_SPEC',
+    'SET_FUNCTION_ATTRIBUTE',
 ])) - _BLACKLIST
 
 
@@ -428,6 +452,7 @@ ALLOWED_KEYWORD = frozenset(['False', 'None', 'True', 'and', 'as', 'elif', 'else
 # regexpr for string formatting and extract ( ruby-style )|( jinja-style  ) used in `_compile_format`
 FORMAT_REGEX = re.compile(r'(?:#\{(.+?)\})|(?:\{\{(.+?)\}\})')
 RSTRIP_REGEXP = re.compile(r'\n[ \t]*$')
+LSTRIP_REGEXP = re.compile(r'^[ \t]*\n')
 FIRST_RSTRIP_REGEXP = re.compile(r'^(\n[ \t]*)+(\n[ \t])')
 VARNAME_REGEXP = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 TO_VARNAME_REGEXP = re.compile(r'[^A-Za-z0-9_]+')
@@ -436,6 +461,10 @@ SPECIAL_DIRECTIVES = {'t-translation', 't-ignore', 't-title'}
 # Name of the variable to insert the content in t-call in the template.
 # The slot will be replaced by the `t-call` tag content of the caller.
 T_CALL_SLOT = '0'
+
+
+# Only allow a javascript scheme if it is followed by [ ][window.]history.back()
+MALICIOUS_SCHEMES = re.compile(r'javascript:(?!( ?)((window\.)?)history\.back\(\)$)', re.I).findall
 
 
 def indent_code(code, level):
@@ -572,7 +601,7 @@ class IrQWeb(models.AbstractModel):
     # assume cache will be invalidated by third party on write to ir.ui.view
     def _get_template_cache_keys(self):
         """ Return the list of context keys to use for caching ``_compile``. """
-        return ['lang', 'inherit_branding', 'edit_translations', 'profile']
+        return ['lang', 'inherit_branding', 'inherit_branding_auto', 'edit_translations', 'profile']
 
     @tools.conditional(
         'xml' not in tools.config['dev_mode'],
@@ -601,17 +630,27 @@ class IrQWeb(models.AbstractModel):
         # generate the template functions and the root function name
         def generate_functions():
             code, options, def_name = self._generate_code(template)
+            if self.env.context.get('profile'):
+                ref_value = None
+                with contextlib.suppress(ValueError, TypeError):
+                    ref_value = int(options.get('ref'))
+                profile_options = {
+                    'ref': ref_value,
+                    'ref_xml': options.get('ref_xml') and str(options['ref_xml']) or None,
+                }
+            else:
+                profile_options = None
             code = '\n'.join([
                 "def generate_functions():",
                 "    template_functions = {}",
                 indent_code(code, 1),
-                f"    template_functions['options'] = {options if self.env.context.get('profile') else None!r}",
+                f"    template_functions['options'] = {profile_options!r}",
                 "    return template_functions",
             ])
 
             try:
                 compiled = compile(code, f"<{ref}>", 'exec')
-                globals_dict = self._prepare_globals()
+                globals_dict = self.__prepare_globals()
                 globals_dict['__builtins__'] = globals_dict # So that unknown/unsafe builtins are never added.
                 unsafe_eval(compiled, globals_dict)
                 return globals_dict['generate_functions'](), def_name
@@ -639,6 +678,8 @@ class IrQWeb(models.AbstractModel):
 
             :returns: tuple containing code, options and main method name
         """
+        if not isinstance(template, (int, str, etree._Element)):
+            template = str(template)
         # The `compile_context`` dictionary includes the elements used for the
         # cache key to which are added the template references as well as
         # technical information useful for generating the function. This
@@ -675,8 +716,10 @@ class IrQWeb(models.AbstractModel):
         # Reference to the last node being compiled. It is mainly used for debugging and displaying error messages.
         compile_context['_qweb_error_path_xml'] = None
 
-        if not compile_context.get('nsmap'):
-            compile_context['nsmap'] = {}
+        compile_context['nsmap'] = {
+            ns_prefix: str(ns_definition)
+            for ns_prefix, ns_definition in compile_context.get('nsmap', {}).items()
+        }
 
         # The options dictionary includes cache key elements and template
         # references. It will be attached to the generated function. This
@@ -879,7 +922,7 @@ class IrQWeb(models.AbstractModel):
             context['is_t_cache_disabled'] = True
         return self.with_context(**context)
 
-    def _prepare_globals(self):
+    def __prepare_globals(self):
         """ Prepare the global context that will sent to eval the qweb
         generated code.
         """
@@ -1269,7 +1312,7 @@ class IrQWeb(models.AbstractModel):
         """ Compile a purely static element into a list of string. """
         if not el.nsmap:
             unqualified_el_tag = el_tag = el.tag
-            attrib = self._post_processing_att(el.tag, el.attrib)
+            attrib = self._post_processing_att(el.tag, {**el.attrib, '__is_static_node': True})
         else:
             # Etree will remove the ns prefixes indirection by inlining the corresponding
             # nsmap definition into the tag attribute. Restore the tag and prefix here.
@@ -1299,7 +1342,7 @@ class IrQWeb(models.AbstractModel):
                 else:
                     attrib[key] = value
 
-            attrib = self._post_processing_att(el.tag, attrib)
+            attrib = self._post_processing_att(el.tag, {**attrib, '__is_static_node': True})
 
             # Update the dict of inherited namespaces before continuing the recursion. Note:
             # since `compile_context['nsmap']` is a dict (and therefore mutable) and we do **not**
@@ -1658,7 +1701,7 @@ class IrQWeb(models.AbstractModel):
         if el.text is not None:
             self._append_text(el.text, compile_context)
         body = []
-        for item in el:
+        for item in list(el):
             if isinstance(item, etree._Comment):
                 if compile_context.get('preserve_comments'):
                     self._append_text(f"<!--{item.text}-->", compile_context)
@@ -1682,12 +1725,14 @@ class IrQWeb(models.AbstractModel):
 
         assert not expr.isspace(), 't-if or t-elif expression should not be empty.'
 
-        strip = self._rstrip_text(compile_context)
+        strip = self._rstrip_text(compile_context)  # the withspaces is visible only when display a content
+        if el.tag.lower() == 't' and el.text and LSTRIP_REGEXP.search(el.text):
+            strip = ''  # remove technical spaces
         code = self._flush_text(compile_context, level)
 
         code.append(indent_code(f"if {self._compile_expr(expr)}:", level))
         body = []
-        if strip and el.tag.lower() != 't':
+        if strip:
             self._append_text(strip, compile_context)
         body.extend(
             self._compile_directives(el, compile_context, level + 1) +
@@ -1727,7 +1772,7 @@ class IrQWeb(models.AbstractModel):
 
             code.append(indent_code("else:", level))
             body = []
-            if strip and next_el.tag.lower() != 't':
+            if strip:
                 self._append_text(strip, compile_context)
             body.extend(
                 self._compile_node(next_el, compile_context, level + 1)+
@@ -2326,6 +2371,9 @@ class IrQWeb(models.AbstractModel):
 
             @returns dict
         """
+        href = atts.get('href')
+        if not atts.pop('__is_static_node', False) and href and MALICIOUS_SCHEMES(str(href)):
+            atts['href'] = ""
         return atts
 
     def _get_field(self, record, field_name, expression, tagName, field_options, values):

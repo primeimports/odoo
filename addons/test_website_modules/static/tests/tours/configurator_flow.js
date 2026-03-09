@@ -24,6 +24,7 @@ tour.register('configurator_flow', {
     {
         content: "click next",
         trigger: 'button.o_configurator_show',
+        timeout: 20000,  /* previous step create a new website, this could take a long time */
     },
     // Description screen
     {
@@ -90,7 +91,7 @@ tour.register('configurator_flow', {
                 }
             }
             for (const url of ['/', '/event', '/slides', '/pricing', '/blog/', '/blog/', '/contactus']) {
-                if (!$iframe.contents().find(`#top_menu a[href^='${url}'`).length) {
+                if (!$iframe.contents().find(`#top_menu a[href^='${url}']`).length) {
                     console.error(`Missing ${url} menu URL. It should have been created by the configurator.`);
                 }
             }

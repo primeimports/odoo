@@ -5,11 +5,13 @@
 
 """
 
+import datetime
 import itertools
 import logging
 import sys
 import threading
 import time
+import traceback
 
 import odoo
 import odoo.modules.db
@@ -88,7 +90,7 @@ def load_demo(cr, package, idref, mode):
             with cr.savepoint(flush=False):
                 load_data(cr, idref, mode, kind='demo', package=package)
         return True
-    except Exception as e:
+    except Exception:  # noqa: BLE001
         # If we could not install demo data for this module
         _logger.warning(
             "Module %s demo data failed to install, installed without demo data",
@@ -99,7 +101,7 @@ def load_demo(cr, package, idref, mode):
         Failure = env.get('ir.demo_failure')
         if todo and Failure is not None:
             todo.state = 'open'
-            Failure.create({'module_id': package.id, 'error': str(e)})
+            Failure.create({'module_id': package.id, 'error': traceback.format_exc()})
         return False
 
 
@@ -191,6 +193,7 @@ def load_module_graph(cr, graph, status=None, perform_checks=True,
             py_module = sys.modules['odoo.addons.%s' % (module_name,)]
             pre_init = package.info.get('pre_init_hook')
             if pre_init:
+                registry.setup_models(cr)
                 getattr(py_module, pre_init)(cr)
 
         model_names = registry.load(cr, package)
@@ -286,7 +289,7 @@ def load_module_graph(cr, graph, status=None, perform_checks=True,
                 env['ir.http']._clear_routing_map()     # force routing map to be rebuilt
 
                 tests_t0, tests_q0 = time.time(), odoo.sql_db.sql_counter
-                test_results = loader.run_suite(suite, module_name)
+                test_results = loader.run_suite(suite, module_name, global_report=report)
                 report.update(test_results)
                 test_time = time.time() - tests_t0
                 test_queries = odoo.sql_db.sql_counter - tests_q0
@@ -326,7 +329,7 @@ def load_module_graph(cr, graph, status=None, perform_checks=True,
         if test_results and not test_results.wasSuccessful():
             _logger.error(
                 "Module %s: %d failures, %d errors of %d tests",
-                module_name, len(test_results.failures), len(test_results.errors),
+                module_name, test_results.failures_count, test_results.errors_count,
                 test_results.testsRun
             )
 
@@ -416,6 +419,14 @@ def load_modules(registry, force_demo=False, status=None, update_module=False):
         if not graph:
             _logger.critical('module base cannot be loaded! (hint: verify addons-path)')
             raise ImportError('Module `base` cannot be loaded! (hint: verify addons-path)')
+        if update_module and tools.config['update']:
+            for pyfile in tools.config['pre_upgrade_scripts'].split(','):
+                odoo.modules.migration.exec_script(cr, graph['base'].installed_version, pyfile, 'base', 'pre')
+
+        if update_module and odoo.tools.table_exists(cr, 'ir_model_fields'):
+            # determine the fields which are currently translated in the database
+            cr.execute("SELECT model || '.' || name FROM ir_model_fields WHERE translate IS TRUE")
+            registry._database_translated_fields = {row[0] for row in cr.fetchall()}
 
         # processed_modules: for cleanup step after install
         # loaded_modules: to avoid double loading
@@ -483,6 +494,23 @@ def load_modules(registry, force_demo=False, status=None, update_module=False):
                     ['to install'], force, status, report,
                     loaded_modules, update_module, models_to_check)
 
+        if update_module:
+            # set up the registry without the patch for translated fields
+            database_translated_fields = registry._database_translated_fields
+            registry._database_translated_fields = ()
+            registry.setup_models(cr)
+            # determine which translated fields should no longer be translated,
+            # and make their model fix the database schema
+            models_to_untranslate = set()
+            for full_name in database_translated_fields:
+                model_name, field_name = full_name.rsplit('.', 1)
+                if model_name in registry:
+                    field = registry[model_name]._fields.get(field_name)
+                    if field and not field.translate:
+                        _logger.debug("Making field %s non-translated", field)
+                        models_to_untranslate.add(model_name)
+            registry.init_models(cr, list(models_to_untranslate), {'models_to_check': True})
+
         registry.loaded = True
         registry.setup_models(cr)
 
@@ -521,6 +549,12 @@ def load_modules(registry, force_demo=False, status=None, update_module=False):
 
             # Cleanup orphan records
             env['ir.model.data']._process_end(processed_modules)
+            # Cleanup cron
+            vacuum_cron = env.ref('base.autovacuum_job', raise_if_not_found=False)
+            if vacuum_cron:
+                # trigger after a small delay to give time for assets to regenerate
+                vacuum_cron._trigger(at=datetime.datetime.now() + datetime.timedelta(minutes=1))
+
             env.flush_all()
 
         for kind in ('init', 'demo', 'update'):
@@ -540,6 +574,7 @@ def load_modules(registry, force_demo=False, status=None, update_module=False):
                     if uninstall_hook:
                         py_module = sys.modules['odoo.addons.%s' % (pkg.name,)]
                         getattr(py_module, uninstall_hook)(cr, registry)
+                        env.flush_all()
 
                 Module = env['ir.module.module']
                 Module.browse(modules_to_remove.values()).module_uninstall()

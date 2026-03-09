@@ -5,7 +5,7 @@ import { useBus, useService } from "@web/core/utils/hooks";
 import { ControlPanel } from "@web/search/control_panel/control_panel";
 import { ReceptionReportTable } from "../reception_report_table/stock_reception_report_table";
 
-const { Component, onWillStart, useState } = owl;
+const { Component, onMounted, onWillStart, useState } = owl;
 
 export class ReceptionReportMain extends Component {
     setup() {
@@ -15,6 +15,7 @@ export class ReceptionReportMain extends Component {
         };
         this.ormService = useService("orm");
         this.actionService = useService("action");
+        this.routerService = useService("router");
         this.reportName = "stock.report_reception";
         this.state = useState({
             sourcesToLines: {},
@@ -22,21 +23,43 @@ export class ReceptionReportMain extends Component {
         useBus(this.env.bus, "update-assign-state", (ev) => this._changeAssignedState(ev.detail));
 
         onWillStart(async () => {
+            // Check the router if report was already loaded.
+            let defaultDocIds;
+            const { rfield, rids } = this.routerService.current.hash;
+            if (rfield && rids) {
+                const parsedIds = JSON.parse(rids);
+                defaultDocIds = [ rfield, parsedIds instanceof Array ? parsedIds : [parsedIds] ];
+            } else {
+                defaultDocIds = Object.entries(this.context).find(([k, v]) => k.startsWith("default_"));
+                if (!defaultDocIds) {
+                    // If nothing could be found, just ask for empty data.
+                    defaultDocIds = [false, [0]];
+                }
+            }
+            this.contextDefaultDoc = { field: defaultDocIds[0], ids: defaultDocIds[1] };
             this.data = await this.getReportData();
             this.state.sourcesToLines = this.data.sources_to_lines;
         });
+
+        onMounted(() => {
+            if (this.data.docs) {
+                // Add the field/ids to the URL, so we can properly reload them after a page refresh.
+                this.routerService.pushState({ rfield: this.contextDefaultDoc.field, rids: JSON.stringify(this.contextDefaultDoc.ids)}, { replace: true });
+            }
+        })
     }
 
     async getReportData() {
+        const context = { ...this.context, [this.contextDefaultDoc.field]: this.contextDefaultDoc.ids };
         const args = [
-            this.context.default_picking_ids,
-            { context: this.context, report_type: "html" },
+            this.contextDefaultDoc.ids,
+            { context, report_type: "html" },
         ];
         return this.ormService.call(
             "report.stock.report_reception",
             "get_report_data",
             args,
-            { context: this.context }
+            { context },
         );
     }
 
@@ -78,7 +101,7 @@ export class ReceptionReportMain extends Component {
         return this.actionService.doAction({
             type: "ir.actions.report",
             report_type: "qweb-pdf",
-            report_name: `${this.reportName}/${this.context.default_picking_ids.join(",")}`,
+            report_name: `${this.reportName}/?context={"${this.contextDefaultDoc.field}": ${JSON.stringify(this.contextDefaultDoc.ids)}}`,
             report_file: this.reportName,
         });
     }
@@ -92,7 +115,7 @@ export class ReceptionReportMain extends Component {
             for (const line of lines) {
                 if (!line.is_assigned) continue;
                 modelIds.push(line.move_out_id);
-                quantities.push(line.quantity || 1);
+                quantities.push(Math.ceil(line.quantity) || 1);
             }
         }
         if (!modelIds.length) {
@@ -133,7 +156,7 @@ export class ReceptionReportMain extends Component {
     }
 
     get isAssignAllDisabled() {
-        return Object.values(this.state.sourcesToLines).every(lines => lines.every(line => line.is_assigned));
+        return Object.values(this.state.sourcesToLines).every(lines => lines.every(line => line.is_assigned || !line.is_qty_assignable));
     }
 
     get isPrintLabelDisabled() {

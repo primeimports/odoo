@@ -1,4 +1,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
+import os
+
+from unittest import skipIf
 
 from odoo.addons.crm.tests.common import TestCrmCommon
 from odoo.tests import HttpCase
@@ -9,8 +12,24 @@ from odoo.tests.common import tagged, users
 class TestUi(HttpCase):
 
     def test_01_crm_tour(self):
+        # TODO: The tour is raising a JS error when selecting Brandon Freeman
+        # but with the demo data it succeeds to continue if there is already another lead
+        # in the pipe
+        brandon = self.env["res.partner"].create({
+            'name': 'Brandon Freeman',
+            'email': 'brandon.freeman55@example.com',
+            'phone': '(355)-687-3262',
+        })
+        self.env['crm.lead'].create({
+            'name': "Zizizbroken",
+            'type': 'opportunity',
+            'partner_id': brandon.id,
+            'stage_id': self.env.ref('crm.stage_lead1').id,
+            'user_id': self.env.ref('base.user_admin').id,
+        })
         self.start_tour("/web", 'crm_tour', login="admin")
 
+    @skipIf(os.getenv("ODOO_FAKETIME_TEST_MODE"), 'This tour uses CURRENT_DATE which cannot work in faketime mode')
     def test_02_crm_tour_rainbowman(self):
         # we create a new user to make sure they get the 'Congrats on your first deal!'
         # rainbowman message.
